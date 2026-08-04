@@ -1,4 +1,4 @@
-"""Train the append-only growing-width transformer."""
+"""Train the growing-then-frozen-width transformer."""
 
 import sys
 from pathlib import Path

@@ -279,12 +279,14 @@ class GenericTransformer(nn.Module):
 
 
 class ScratchBlock(nn.Module):
-    """Read the full stream and append one fixed-width scratch chunk."""
+    """Read the full stream and produce a fixed-width block output."""
 
     def __init__(self, layer_index: int, config: GrowingWidthConfig) -> None:
         super().__init__()
         self.layer_index = layer_index
-        stream_width = config.d_embed * (layer_index + 1)
+        stream_width = config.d_embed * (
+            min(layer_index, config.embed_cutoff_layer) + 1
+        )
         self.input_proj = nn.Linear(
             stream_width, config.d_embed, bias=False
         )
@@ -319,11 +321,11 @@ class ScratchBlock(nn.Module):
 
 
 class GrowingWidthTransformer(nn.Module):
-    """Decoder with an append-only, fixed-chunk residual stream.
+    """Decoder with a growing-then-frozen, fixed-chunk residual stream.
 
-    Every block reads the embedding channels and all earlier scratch chunks,
-    then appends one ``d_embed``-wide chunk. The original embedding signal
-    decays linearly; late blocks accumulate learned writes in its place.
+    Pre-cutoff blocks append one ``d_embed``-wide scratch chunk. Post-cutoff
+    blocks read that frozen stream and accumulate learned reconstruction
+    writes in the embedding channels without appending further chunks.
     """
 
     def __init__(
@@ -395,8 +397,10 @@ class GrowingWidthTransformer(nn.Module):
             )
             stream = torch.cat((embed_channels, *scratch_chunks), dim=-1)
             scratch = block(stream)
-            scratch_chunks.append(scratch)
-            if block.embed_write is not None:
+            if layer_index < self.config.embed_cutoff_layer:
+                scratch_chunks.append(scratch)
+            else:
+                assert block.embed_write is not None
                 embed_updates = embed_updates + block.embed_write(scratch)
 
         final_embed = (

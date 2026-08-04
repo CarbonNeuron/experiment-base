@@ -1,4 +1,4 @@
-"""Tests for the append-only growing-width decoder."""
+"""Tests for the growing-then-frozen-width decoder."""
 
 from pathlib import Path
 import tempfile
@@ -33,7 +33,7 @@ def make_model(
 
 
 class GrowingWidthTransformerTests(unittest.TestCase):
-    def test_stream_grows_by_one_scratch_chunk_per_layer(self) -> None:
+    def test_stream_stops_growing_at_embed_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model = make_model(Path(directory))
             input_widths: list[int] = []
@@ -49,9 +49,9 @@ class GrowingWidthTransformerTests(unittest.TestCase):
                 for handle in handles:
                     handle.remove()
 
-            self.assertEqual(input_widths, [16, 32, 48, 64])
-            widths_after_layers = [width + 16 for width in input_widths]
-            self.assertEqual(widths_after_layers, [32, 48, 64, 80])
+            self.assertEqual(input_widths, [16, 32, 48, 48])
+            cutoff = model.config.embed_cutoff_layer
+            self.assertEqual(input_widths[cutoff:], [48, 48])
             self.assertEqual(model.layer_widths, input_widths)
 
     def test_embed_channels_decay_linearly(self) -> None:

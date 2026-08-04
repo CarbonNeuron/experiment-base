@@ -41,7 +41,7 @@ class TransformerConfig:
 
 @dataclass
 class GrowingWidthConfig:
-    """Architecture settings for an append-only residual stream."""
+    """Architecture settings for a growing-then-frozen residual stream."""
 
     d_embed: int = 128
     n_heads: int = 8
