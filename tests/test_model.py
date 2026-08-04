@@ -5,11 +5,8 @@ from unittest.mock import patch
 
 import torch
 
-from model import (
-    GenericTransformer,
-    TransformerConfig,
-    resolve_compile_backend,
-)
+from config import TransformerConfig
+from model import GenericTransformer, resolve_compile_backend
 
 
 def make_model(tmp_path: Path) -> tuple[GenericTransformer, torch.Tensor]:

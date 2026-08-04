@@ -69,6 +69,37 @@ Architecture and training settings are exposed as command-line arguments; run
 `python train.py --help` for the full list. `--d-model` selects the matching
 OpenAI SVD width and must be one of the released artifact dimensions.
 
+## Code layout
+
+Each module owns one concern:
+
+| Module | Responsibility |
+|---|---|
+| `config.py` | Structured model, data, training, and runtime settings |
+| `data.py` | WikiText token cache and DataLoader construction |
+| `model.py` | Transformer architecture and encoder compilation |
+| `trainer.py` | Optimization, evaluation, progress, and checkpoints |
+| `experiment.py` | Compose configured model, data, and trainer |
+| `train.py` | Translate command-line arguments into configuration |
+
+Experiments can call `run_experiment()` directly and do not need to imitate the
+CLI. This keeps architecture changes independent from dataset and training-loop
+changes.
+
+## Model-size scripts
+
+Ready-to-edit Python presets live under `scripts/`:
+
+```bash
+python scripts/train_128d.py
+python scripts/train_256d.py
+python scripts/train_512d.py
+```
+
+They cover compact 128d, mid-sized 256d, and larger 512d transformers. Each
+file contains its complete `ExperimentConfig` and writes to a separate
+checkpoint directory. See `scripts/README.md` for the preset table.
+
 For a quick GPU check without committing to a full run:
 
 ```bash

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import warnings
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +12,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from svd_embeds import OpenAIEmbedding
 
-
-COMPILE_BACKENDS = ("auto", "inductor", "aot_eager", "eager")
+from config import COMPILE_BACKENDS, TransformerConfig
 
 
 def resolve_compile_backend(requested: str, device_type: str) -> str:
@@ -34,32 +32,6 @@ def resolve_compile_backend(requested: str, device_type: str) -> str:
     if device_type not in {"cpu", "cuda"}:
         return "aot_eager"
     return "inductor"
-
-
-@dataclass
-class TransformerConfig:
-    """Architecture settings for :class:`GenericTransformer`."""
-
-    d_model: int = 128
-    n_heads: int = 8
-    n_layers: int = 6
-    d_ff: int = 512
-    max_seq_len: int = 512
-    dropout: float = 0.1
-    layer_norm_eps: float = 1e-5
-
-    def __post_init__(self) -> None:
-        if self.d_model <= 0 or self.n_heads <= 0 or self.n_layers <= 0:
-            raise ValueError("model dimensions and layer counts must be positive")
-        if self.d_model % self.n_heads:
-            raise ValueError("d_model must be divisible by n_heads")
-        if self.d_ff <= 0 or self.max_seq_len <= 0:
-            raise ValueError("d_ff and max_seq_len must be positive")
-        if not 0.0 <= self.dropout < 1.0:
-            raise ValueError("dropout must be in [0, 1)")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 class CausalSelfAttention(nn.Module):
