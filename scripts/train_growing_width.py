@@ -1,4 +1,4 @@
-"""Train the progressively widening 128d-to-1024d transformer."""
+"""Train the append-only growing-width transformer."""
 
 import sys
 from pathlib import Path
@@ -20,8 +20,7 @@ from trainer import Trainer, resolve_device  # noqa: E402
 
 MODEL_CONFIG = GrowingWidthConfig(
     d_embed=128,
-    d_model=1024,
-    n_heads=16,
+    n_heads=8,
     n_layers=12,
     d_ff_ratio=4.0,
     max_seq_len=512,

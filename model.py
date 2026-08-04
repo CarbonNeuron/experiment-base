@@ -278,72 +278,53 @@ class GenericTransformer(nn.Module):
         return parameters
 
 
-class GrowingCausalSelfAttention(nn.Module):
-    """Causal self-attention parameterized by one layer's specific width."""
+class ScratchBlock(nn.Module):
+    """Read the full stream and append one fixed-width scratch chunk."""
 
-    def __init__(self, width: int, n_heads: int, dropout: float) -> None:
+    def __init__(self, layer_index: int, config: GrowingWidthConfig) -> None:
         super().__init__()
-        self.width = width
-        self.n_heads = n_heads
-        self.head_dim = width // n_heads
-        self.qkv = nn.Linear(width, 3 * width, bias=False)
-        self.out_proj = nn.Linear(width, width, bias=False)
-        self.dropout = dropout
-        self.resid_dropout = nn.Dropout(dropout)
-
-    def forward(self, x: Tensor) -> Tensor:
-        batch_size, seq_len, _ = x.shape
-        query, key, value = self.qkv(x).split(self.width, dim=-1)
-
-        def split_heads(tensor: Tensor) -> Tensor:
-            return tensor.view(
-                batch_size, seq_len, self.n_heads, self.head_dim
-            ).transpose(1, 2)
-
-        query, key, value = map(split_heads, (query, key, value))
-        attended = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=True,
-        )
-        attended = attended.transpose(1, 2).contiguous().view(
-            batch_size, seq_len, self.width
-        )
-        return self.resid_dropout(self.out_proj(attended))
-
-
-class GrowingTransformerBlock(nn.Module):
-    """A pre-norm transformer block operating at one scheduled width."""
-
-    def __init__(
-        self,
-        width: int,
-        n_heads: int,
-        d_ff_ratio: float,
-        dropout: float,
-        layer_norm_eps: float,
-    ) -> None:
-        super().__init__()
-        d_ff = round(d_ff_ratio * width)
-        self.attn_norm = nn.LayerNorm(width, eps=layer_norm_eps)
-        self.attn = GrowingCausalSelfAttention(width, n_heads, dropout)
-        self.ffn_norm = nn.LayerNorm(width, eps=layer_norm_eps)
-        self.ffn = nn.Sequential(
-            nn.Linear(width, d_ff),
-            nn.GELU(),
-            nn.Linear(d_ff, width),
-            nn.Dropout(dropout),
+        self.layer_index = layer_index
+        stream_width = config.d_embed * (layer_index + 1)
+        self.input_proj = nn.Linear(
+            stream_width, config.d_embed, bias=False
         )
 
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.attn(self.attn_norm(x))
-        return x + self.ffn(self.ffn_norm(x))
+        internal_config = TransformerConfig(
+            d_model=config.d_embed,
+            n_heads=config.n_heads,
+            n_layers=1,
+            d_ff=round(config.d_ff_ratio * config.d_embed),
+            max_seq_len=config.max_seq_len,
+            dropout=config.dropout,
+            layer_norm_eps=config.layer_norm_eps,
+        )
+        self.attn_norm = nn.LayerNorm(
+            config.d_embed, eps=config.layer_norm_eps
+        )
+        self.attn = CausalSelfAttention(internal_config)
+        self.ffn_norm = nn.LayerNorm(
+            config.d_embed, eps=config.layer_norm_eps
+        )
+        self.ffn = FeedForward(internal_config)
+        self.embed_write = (
+            nn.Linear(config.d_embed, config.d_embed, bias=False)
+            if layer_index >= config.embed_cutoff_layer
+            else None
+        )
+
+    def forward(self, stream: Tensor) -> Tensor:
+        hidden = self.input_proj(stream)
+        hidden = hidden + self.attn(self.attn_norm(hidden))
+        return hidden + self.ffn(self.ffn_norm(hidden))
 
 
 class GrowingWidthTransformer(nn.Module):
-    """Decoder-only transformer whose hidden width grows between layers."""
+    """Decoder with an append-only, fixed-chunk residual stream.
+
+    Every block reads the embedding channels and all earlier scratch chunks,
+    then appends one ``d_embed``-wide chunk. The original embedding signal
+    decays linearly; late blocks accumulate learned writes in its place.
+    """
 
     def __init__(
         self,
@@ -356,31 +337,14 @@ class GrowingWidthTransformer(nn.Module):
         elif isinstance(config, dict):
             config = GrowingWidthConfig(**config)
         self.config = config
-        self.widths = config.layer_widths
 
         self.embedding_dropout = nn.Dropout(config.dropout)
         self.blocks = nn.ModuleList(
-            GrowingTransformerBlock(
-                width,
-                config.n_heads,
-                config.d_ff_ratio,
-                config.dropout,
-                config.layer_norm_eps,
-            )
-            for width in self.widths
+            ScratchBlock(layer_index, config)
+            for layer_index in range(config.n_layers)
         )
-        self.projections = nn.ModuleList(
-            nn.Linear(source, target, bias=False)
-            if source != target
-            else nn.Identity()
-            for source, target in zip(self.widths, self.widths[1:])
-        )
-        final_width = self.widths[-1]
         self.final_norm = nn.LayerNorm(
-            final_width, eps=config.layer_norm_eps
-        )
-        self.output_projection = nn.Linear(
-            final_width, config.d_embed, bias=False
+            config.d_embed, eps=config.layer_norm_eps
         )
 
         self.apply(GenericTransformer._init_weights)
@@ -397,8 +361,17 @@ class GrowingWidthTransformer(nn.Module):
 
     @property
     def layer_widths(self) -> list[int]:
-        """A copy of the widths used by successive blocks."""
-        return list(self.widths)
+        """Full stream widths read by successive blocks."""
+        return [block.input_proj.in_features for block in self.blocks]
+
+    def embed_decay(self, layer_index: int) -> float:
+        """Return the original embedding signal retained at one layer."""
+        cutoff = self.config.embed_cutoff_layer
+        if layer_index < 0 or layer_index >= self.config.n_layers:
+            raise IndexError("layer index out of range")
+        if cutoff == 0 or layer_index >= cutoff:
+            return 0.0
+        return 1.0 - layer_index / cutoff
 
     def effective_embeddings(self) -> Tensor:
         """Return the tied, trainable embedding table."""
@@ -410,13 +383,27 @@ class GrowingWidthTransformer(nn.Module):
         return self.embeddings.num_embeddings
 
     def _encode_hidden(self, input_ids: Tensor) -> Tensor:
-        hidden = self.embedding_dropout(self.embeddings(input_ids))
+        embedded = self.embedding_dropout(self.embeddings(input_ids))
+        embed_updates = torch.zeros_like(embedded)
+        scratch_chunks: list[Tensor] = []
+
         for layer_index, block in enumerate(self.blocks):
-            hidden = block(hidden)
-            if layer_index < len(self.projections):
-                hidden = self.projections[layer_index](hidden)
-        hidden = self.final_norm(hidden)
-        return self.output_projection(hidden)
+            # Track the decaying source separately so learned late-layer writes
+            # persist instead of being multiplied by the source decay again.
+            embed_channels = (
+                embedded * self.embed_decay(layer_index) + embed_updates
+            )
+            stream = torch.cat((embed_channels, *scratch_chunks), dim=-1)
+            scratch = block(stream)
+            scratch_chunks.append(scratch)
+            if block.embed_write is not None:
+                embed_updates = embed_updates + block.embed_write(scratch)
+
+        final_embed = (
+            embedded * self.embed_decay(self.config.n_layers - 1)
+            + embed_updates
+        )
+        return self.final_norm(final_embed)
 
     def encode(self, input_ids: Tensor) -> Tensor:
         """Return final hidden states in the tied embedding space."""
@@ -508,7 +495,7 @@ class GrowingWidthTransformer(nn.Module):
         return logits, loss
 
     def num_parameters(self, trainable_only: bool = False) -> int:
-        """Count model parameters, including learned width projections."""
+        """Count parameters, including growing stream input projections."""
         parameters = sum(
             parameter.numel()
             for parameter in self.parameters()
