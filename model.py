@@ -172,9 +172,7 @@ class GenericTransformer(nn.Module):
             hidden = block(hidden)
         return self.final_norm(hidden)
 
-    def encode(
-        self, input_ids: Tensor, *, use_compiled: bool = True
-    ) -> Tensor:
+    def encode(self, input_ids: Tensor) -> Tensor:
         """Return final hidden states without materializing vocabulary logits."""
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence]")
@@ -185,7 +183,7 @@ class GenericTransformer(nn.Module):
                 f"{self.config.max_seq_len}"
             )
 
-        if not use_compiled or self._compiled_encoder is None:
+        if self._compiled_encoder is None:
             return self._encode_hidden(input_ids)
         try:
             return self._compiled_encoder(input_ids)
@@ -244,11 +242,8 @@ class GenericTransformer(nn.Module):
         loss_chunk_size: int = 0,
         loss_backend: str = "tiled",
         loss_negative_samples: int = 4096,
-        use_compiled_encoder: bool = True,
     ) -> tuple[Tensor | None, Tensor | None]:
-        hidden = self.encode(
-            input_ids, use_compiled=use_compiled_encoder
-        )
+        hidden = self.encode(input_ids)
         loss = None
         if targets is not None:
             if targets.shape != input_ids.shape:

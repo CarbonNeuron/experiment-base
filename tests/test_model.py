@@ -112,21 +112,6 @@ class GenericTransformerTests(unittest.TestCase):
             )
             torch.testing.assert_close(compiled, eager)
 
-    def test_encoder_can_bypass_compilation_for_validation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            model, _ = make_model(Path(directory))
-            model.eval()
-            input_ids = torch.randint(0, model.vocab_size, (2, 8))
-
-            def unexpected_compiled_call(_: torch.Tensor) -> torch.Tensor:
-                raise AssertionError("compiled encoder should be bypassed")
-
-            model._compiled_encoder = unexpected_compiled_call
-            with torch.no_grad():
-                hidden = model.encode(input_ids, use_compiled=False)
-            self.assertEqual(hidden.shape, (2, 8, model.config.d_model))
-            self.assertIs(model._compiled_encoder, unexpected_compiled_call)
-
     def test_auto_compile_backend_avoids_inductor_without_triton(self) -> None:
         with patch("model.importlib.util.find_spec", return_value=None):
             self.assertEqual(

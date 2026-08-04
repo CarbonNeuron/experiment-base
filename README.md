@@ -71,9 +71,9 @@ graphs focused and preserves the loss's bounded-memory behavior. Select a mode
 with `--compile-mode` and a backend with `--compile-backend`. The default
 `auto` backend uses Inductor when supported, but selects `aot_eager` on CUDA
 machines without Triton instead of failing during the first matrix multiply.
-Validation uses the eager encoder to avoid a long, separate eval-graph compile
-on its first batch. Any remaining training backend failure automatically falls
-back to eager execution.
+Validation uses the compiled encoder too. Training and evaluation modes may
+create separate graphs on first use, after which each graph is reused. Any
+remaining backend failure automatically falls back to eager execution.
 
 Native CUDA Inductor requires Triton. Standard Windows PyTorch installations
 often do not include it; install a compatible `triton-windows` build if you
