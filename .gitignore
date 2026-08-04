@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+embeddings
+checkpoints/
+data_cache/
+wandb/
+*.log
