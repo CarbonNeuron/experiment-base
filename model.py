@@ -6,14 +6,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-
-
-DEFAULT_EMBED_PATH = Path("embeddings/openai_svd_embeddings_128d.pt")
-EMBED_REPO_ID = "Carbun1/FixingEmbeds"
-EMBED_REPO_FILENAME = "openai/openai_svd_embeddings_128d.pt"
+from svd_embeds import OpenAIEmbedding
 
 
 @dataclass
@@ -125,7 +120,7 @@ class GenericTransformer(nn.Module):
     def __init__(
         self,
         config: TransformerConfig | dict[str, Any] | None = None,
-        embed_path: str | Path = DEFAULT_EMBED_PATH,
+        embed_path: str | Path | None = None,
     ) -> None:
         super().__init__()
         if config is None:
@@ -134,17 +129,6 @@ class GenericTransformer(nn.Module):
             config = TransformerConfig(**config)
         self.config = config
 
-        source = self._load_embedding_tensor(embed_path)
-        source_norms = source.norm(dim=-1).clamp_min(1e-8)
-        self.register_buffer(
-            "directions", (source / source_norms.unsqueeze(-1)).contiguous()
-        )
-        self.norms = nn.Parameter(source_norms)
-        self.rotation = nn.Linear(config.d_model, config.d_model, bias=False)
-
-        self.position_embedding = nn.Embedding(
-            config.max_seq_len, config.d_model
-        )
         self.embedding_dropout = nn.Dropout(config.dropout)
         self.blocks = nn.ModuleList(
             TransformerBlock(config) for _ in range(config.n_layers)
@@ -154,38 +138,19 @@ class GenericTransformer(nn.Module):
         )
 
         self.apply(self._init_weights)
-        nn.init.eye_(self.rotation.weight)
-        self._init_position_embeddings(source_norms.mean())
-
-    def _load_embedding_tensor(self, embed_path: str | Path) -> Tensor:
-        path = Path(embed_path).expanduser()
-        if not path.exists() and path == DEFAULT_EMBED_PATH:
-            try:
-                from huggingface_hub import hf_hub_download
-            except ImportError as error:
-                raise FileNotFoundError(
-                    f"{path} was not found. Install requirements.txt to enable "
-                    "automatic embedding downloads."
-                ) from error
-            path = Path(
-                hf_hub_download(
-                    repo_id=EMBED_REPO_ID,
-                    filename=EMBED_REPO_FILENAME,
-                )
-            )
-        if not path.exists():
-            raise FileNotFoundError(f"embedding file not found: {path}")
-        embeddings = torch.load(path, map_location="cpu", weights_only=True)
-        if not isinstance(embeddings, Tensor) or embeddings.ndim != 2:
-            raise TypeError("embedding file must contain a rank-2 torch.Tensor")
-        expected = (self.config.vocab_size, self.config.d_model)
-        if tuple(embeddings.shape) != expected:
+        embedding_kwargs = (
+            {"embedding_path": embed_path} if embed_path is not None else {}
+        )
+        self.embeddings = OpenAIEmbedding(
+            config.d_model,
+            max_seq_len=config.max_seq_len,
+            **embedding_kwargs,
+        )
+        if self.embeddings.num_embeddings != config.vocab_size:
             raise ValueError(
-                f"embedding shape {tuple(embeddings.shape)} does not match {expected}"
+                f"config vocab_size={config.vocab_size} does not match "
+                f"embedding vocabulary={self.embeddings.num_embeddings}"
             )
-        if not embeddings.is_floating_point():
-            raise TypeError("embedding tensor must have a floating-point dtype")
-        return embeddings.float().contiguous()
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -199,21 +164,12 @@ class GenericTransformer(nn.Module):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
 
-    @torch.no_grad()
-    def _init_position_embeddings(self, target_norm: Tensor) -> None:
-        """Give every initial position vector the mean source-token norm."""
-        weights = self.position_embedding.weight
-        nn.init.normal_(weights, mean=0.0, std=1.0)
-        weights.div_(weights.norm(dim=-1, keepdim=True).clamp_min(1e-8))
-        weights.mul_(target_norm.to(device=weights.device, dtype=weights.dtype))
-
     def effective_embeddings(self) -> Tensor:
         """Return the tied, trainable embedding table."""
-        return self.rotation(self.norms.unsqueeze(-1) * self.directions)
+        return self.embeddings.weight
 
-    def _encode_with_embeddings(
-        self, input_ids: Tensor, embeddings: Tensor
-    ) -> Tensor:
+    def encode(self, input_ids: Tensor) -> Tensor:
+        """Return final hidden states without materializing vocabulary logits."""
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence]")
         seq_len = input_ids.size(1)
@@ -223,34 +179,37 @@ class GenericTransformer(nn.Module):
                 f"{self.config.max_seq_len}"
             )
 
-        positions = torch.arange(seq_len, device=input_ids.device)
-        hidden = F.embedding(input_ids, embeddings)
-        hidden = hidden + self.position_embedding(positions)
-        hidden = self.embedding_dropout(hidden)
+        hidden = self.embedding_dropout(self.embeddings(input_ids))
         for block in self.blocks:
             hidden = block(hidden)
         return self.final_norm(hidden)
 
-    def encode(self, input_ids: Tensor) -> Tensor:
-        """Return final hidden states without materializing vocabulary logits."""
-        return self._encode_with_embeddings(
-            input_ids, self.effective_embeddings()
-        )
-
     def logits(self, hidden: Tensor) -> Tensor:
         """Project hidden states with the tied effective embedding table."""
-        return F.linear(hidden, self.effective_embeddings())
+        return self.embeddings.project(hidden)
 
     def forward(
-        self, input_ids: Tensor, targets: Tensor | None = None
-    ) -> tuple[Tensor, Tensor | None]:
-        embeddings = self.effective_embeddings()
-        hidden = self._encode_with_embeddings(input_ids, embeddings)
-        logits = F.linear(hidden, embeddings)
+        self,
+        input_ids: Tensor,
+        targets: Tensor | None = None,
+        *,
+        loss_chunk_size: int = 0,
+    ) -> tuple[Tensor | None, Tensor | None]:
+        hidden = self.encode(input_ids)
         loss = None
         if targets is not None:
             if targets.shape != input_ids.shape:
                 raise ValueError("targets must have the same shape as input_ids")
+            if loss_chunk_size > 0:
+                loss = self.embeddings.cross_entropy(
+                    hidden,
+                    targets,
+                    chunk_size=loss_chunk_size,
+                )
+                return None, loss
+
+        logits = self.embeddings.project(hidden)
+        if targets is not None:
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
@@ -265,5 +224,5 @@ class GenericTransformer(nn.Module):
             if not trainable_only or parameter.requires_grad
         )
         if not trainable_only:
-            parameters += self.directions.numel()
+            parameters += self.embeddings.directions.numel()
         return parameters

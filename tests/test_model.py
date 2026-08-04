@@ -9,7 +9,7 @@ from model import GenericTransformer, TransformerConfig
 
 def make_model(tmp_path: Path) -> tuple[GenericTransformer, torch.Tensor]:
     torch.manual_seed(7)
-    source = torch.randn(23, 16) * 0.3
+    source = torch.randn(100_277, 16) * 0.3
     embed_path = tmp_path / "embeddings.pt"
     torch.save(source, embed_path)
     config = TransformerConfig(
@@ -17,7 +17,7 @@ def make_model(tmp_path: Path) -> tuple[GenericTransformer, torch.Tensor]:
         n_heads=4,
         n_layers=2,
         d_ff=32,
-        vocab_size=23,
+        vocab_size=100_277,
         max_seq_len=12,
         dropout=0.0,
     )
@@ -31,16 +31,21 @@ class GenericTransformerTests(unittest.TestCase):
             effective = model.effective_embeddings().detach()
 
             torch.testing.assert_close(effective, source)
-            self.assertNotIn("directions", dict(model.named_parameters()))
-            self.assertIn("directions", dict(model.named_buffers()))
+            self.assertNotIn(
+                "embeddings.directions", dict(model.named_parameters())
+            )
+            self.assertIn(
+                "embeddings.directions", dict(model.named_buffers())
+            )
             torch.testing.assert_close(
-                model.position_embedding.weight.norm(dim=-1).mean(),
+                model.embeddings.position_embedding.weight.norm(dim=-1).mean(),
                 source.norm(dim=-1).mean(),
             )
             torch.testing.assert_close(
-                model.rotation.weight,
+                model.embeddings.rotation.weight,
                 torch.eye(model.config.d_model),
             )
+            self.assertNotIn("embeddings.directions", model.state_dict())
 
     def test_forward_and_embedding_gradients(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -48,16 +53,25 @@ class GenericTransformerTests(unittest.TestCase):
             input_ids = torch.randint(0, model.config.vocab_size, (2, 8))
             targets = torch.randint(0, model.config.vocab_size, (2, 8))
 
-            logits, loss = model(input_ids, targets)
+            with torch.no_grad():
+                logits, _ = model(input_ids)
+            assert logits is not None
             self.assertEqual(logits.shape, (2, 8, model.config.vocab_size))
+
+            no_logits, loss = model(
+                input_ids,
+                targets,
+                loss_chunk_size=3,
+            )
+            self.assertIsNone(no_logits)
             self.assertIsNotNone(loss)
             assert loss is not None
             self.assertTrue(torch.isfinite(loss))
             loss.backward()
 
-            self.assertIsNone(model.directions.grad)
-            self.assertIsNotNone(model.norms.grad)
-            self.assertIsNotNone(model.rotation.weight.grad)
+            self.assertIsNone(model.embeddings.directions.grad)
+            self.assertIsNotNone(model.embeddings.norms.grad)
+            self.assertIsNotNone(model.embeddings.rotation.weight.grad)
 
     def test_rejects_wrong_embedding_shape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -68,7 +82,7 @@ class GenericTransformerTests(unittest.TestCase):
                 n_heads=4,
                 n_layers=1,
                 d_ff=32,
-                vocab_size=10,
+                vocab_size=100_277,
             )
             with self.assertRaisesRegex(ValueError, "embedding shape"):
                 GenericTransformer(config, embed_path)

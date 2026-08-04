@@ -2,7 +2,8 @@
 
 A deliberately conventional decoder-only transformer for controlled language
 model experiments. The baseline uses the `cl100k_base` vocabulary and the
-OpenAI 128-dimensional SVD embedding table.
+OpenAI 128-dimensional SVD embedding table through the reusable
+[`svd-embeds`](https://github.com/CarbonNeuron/svd-embeds) package.
 
 ## Baseline architecture
 
@@ -32,21 +33,27 @@ Activate it on Linux/macOS:
 ```bash
 source .venv/bin/activate
 pip install -r requirements.txt
+hf auth login
 python -m unittest discover -s tests -v
 python train.py --device auto
 ```
 
-On Windows, activate with `.venv\Scripts\activate` instead. The first default
-model run automatically downloads the approximately 49 MiB OpenAI 128d SVD
-table from `Carbun1/FixingEmbeds` on Hugging Face and stores it in the normal
-Hugging Face cache. You can instead provide any compatible local table with
-`--embed-path`.
+On Windows, activate with `.venv\Scripts\activate` instead. Authentication is
+currently needed because the `Carbun1/FixingEmbeds` artifact repository is
+private. The first default model run downloads the approximately 49 MiB OpenAI
+128d table into the normal Hugging Face cache; later runs reuse it. You can
+instead provide a compatible local table with `--embed-path`.
 
 The training script downloads and caches WikiText-103, uses bf16 autocast on
 GPU by default, displays training and validation progress with `tqdm`, and
-writes checkpoints under `checkpoints/`. Architecture and training settings
-are exposed as command-line arguments; run
-`python train.py --help` for the full list.
+writes checkpoints under `checkpoints/`. Exact tied-output cross-entropy is
+computed in activation-checkpointed token chunks, avoiding a retained
+`[batch, sequence, 100277]` logits tensor. Adjust memory/throughput with
+`--ce-chunk-size`; use `0` for the conventional full-logit loss.
+
+Architecture and training settings are exposed as command-line arguments; run
+`python train.py --help` for the full list. `--d-model` selects the matching
+OpenAI SVD width and must be one of the released artifact dimensions.
 
 For a quick GPU check without committing to a full run:
 

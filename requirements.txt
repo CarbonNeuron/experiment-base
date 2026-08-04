@@ -3,3 +3,4 @@ datasets>=4.0
 huggingface-hub>=0.30
 tiktoken>=0.9
 tqdm>=4.66
+svd-embeds @ git+https://github.com/CarbonNeuron/svd-embeds.git@v0.3.0

@@ -7,16 +7,16 @@ import math
 from dataclasses import asdict
 from pathlib import Path
 
-import tiktoken
 import torch
 from datasets import load_dataset
+from svd_embeds import get_tokenizer
 from torch import Tensor, nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from model import DEFAULT_EMBED_PATH, GenericTransformer, TransformerConfig
+from model import GenericTransformer, TransformerConfig
 
 
 class TokenDataset(Dataset[Tensor]):
@@ -39,7 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
 
     model = parser.add_argument_group("model")
-    model.add_argument("--embed-path", type=Path, default=DEFAULT_EMBED_PATH)
+    model.add_argument(
+        "--embed-path",
+        type=Path,
+        default=None,
+        help="Optional local OpenAI SVD table (default: download/cache from HF)",
+    )
     model.add_argument("--d-model", type=int, default=128)
     model.add_argument("--n-heads", type=int, default=8)
     model.add_argument("--n-layers", type=int, default=6)
@@ -55,6 +60,12 @@ def parse_args() -> argparse.Namespace:
     training.add_argument("--warmup-steps", type=int, default=500)
     training.add_argument("--grad-accum-steps", type=int, default=1)
     training.add_argument("--max-grad-norm", type=float, default=1.0)
+    training.add_argument(
+        "--ce-chunk-size",
+        type=int,
+        default=1024,
+        help="Flattened token positions per tied-output loss chunk (0=full logits)",
+    )
     training.add_argument("--max-steps", type=int, default=0)
     training.add_argument("--eval-every", type=int, default=500)
     training.add_argument("--eval-batches", type=int, default=50)
@@ -87,7 +98,7 @@ def load_wikitext(cache_dir: Path, seq_len: int, split: str) -> TokenDataset:
         raw = load_dataset(
             "Salesforce/wikitext", "wikitext-103-raw-v1", split=split
         )
-        tokenizer = tiktoken.get_encoding("cl100k_base")
+        tokenizer = get_tokenizer()
         token_ids: list[int] = []
         for text in tqdm(raw["text"], desc=f"Tokenizing {split}", unit="doc"):
             if text:
@@ -124,6 +135,7 @@ def evaluate(
     dtype: torch.dtype,
     amp_enabled: bool,
     max_batches: int,
+    loss_chunk_size: int,
 ) -> float:
     model.eval()
     total_loss = 0.0
@@ -138,7 +150,11 @@ def evaluate(
     ):
         chunk = chunk.to(device, non_blocking=True)
         with autocast_context(device, dtype, amp_enabled):
-            _, loss = model(chunk[:, :-1], chunk[:, 1:])
+            _, loss = model(
+                chunk[:, :-1],
+                chunk[:, 1:],
+                loss_chunk_size=loss_chunk_size,
+            )
         assert loss is not None
         total_loss += loss.float().item()
         batches += 1
@@ -189,7 +205,7 @@ def main() -> None:
     if device.type == "cpu" and dtype == torch.float16:
         amp_enabled = False
 
-    tokenizer = tiktoken.get_encoding("cl100k_base")
+    tokenizer = get_tokenizer()
     config = TransformerConfig(
         d_model=args.d_model,
         n_heads=args.n_heads,
@@ -259,7 +275,11 @@ def main() -> None:
             for batch_index, chunk in enumerate(train_loader):
                 chunk = chunk.to(device, non_blocking=True)
                 with autocast_context(device, dtype, amp_enabled):
-                    _, loss = model(chunk[:, :-1], chunk[:, 1:])
+                    _, loss = model(
+                        chunk[:, :-1],
+                        chunk[:, 1:],
+                        loss_chunk_size=args.ce_chunk_size,
+                    )
                     assert loss is not None
                     scaled_loss = loss / args.grad_accum_steps
                 scaled_loss.backward()
@@ -287,6 +307,7 @@ def main() -> None:
                         dtype,
                         amp_enabled,
                         args.eval_batches,
+                        args.ce_chunk_size,
                     )
                     progress.write(
                         f"step {step}: validation loss={val_loss:.4f} "
