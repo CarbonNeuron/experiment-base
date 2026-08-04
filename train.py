@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
     data = parser.add_argument_group("data")
     data.add_argument("--batch-size", type=int, default=8)
     data.add_argument("--num-workers", type=int, default=2)
+    data.add_argument(
+        "--val-num-workers",
+        type=int,
+        default=0,
+        help="Validation workers (0 avoids Windows process-spawn stalls)",
+    )
     data.add_argument("--cache-dir", type=Path, default=Path("data_cache"))
 
     training = parser.add_argument_group("training")
@@ -110,6 +116,7 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         data=DataConfig(
             batch_size=args.batch_size,
             num_workers=args.num_workers,
+            val_num_workers=args.val_num_workers,
             cache_dir=args.cache_dir,
         ),
         training=TrainingConfig(

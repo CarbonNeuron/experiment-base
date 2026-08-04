@@ -60,6 +60,11 @@ and the sampled negatives, with importance correction. Validation always uses
 the exact tiled 100k-way loss. The ready-made `scripts/train_128d.py` preset
 enables sampled training and encoder compilation by default.
 
+Training DataLoader workers are persistent across epochs. Validation defaults
+to `--val-num-workers 0` because spawning short-lived worker processes causes a
+long `0/50` pause on Windows; its contiguous cached-tensor slices do not benefit
+from multiprocessing. This can be overridden independently if needed.
+
 `--compile` applies `torch.compile` to the token/position/transformer encoder
 while leaving the vocabulary-loss loop eager. This keeps compile
 graphs focused and preserves the loss's bounded-memory behavior. Select a mode

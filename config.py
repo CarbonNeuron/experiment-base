@@ -45,14 +45,15 @@ class DataConfig:
 
     batch_size: int = 8
     num_workers: int = 2
+    val_num_workers: int = 0
     cache_dir: Path = Path("data_cache")
 
     def __post_init__(self) -> None:
         self.cache_dir = Path(self.cache_dir)
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.num_workers < 0:
-            raise ValueError("num_workers must be non-negative")
+        if self.num_workers < 0 or self.val_num_workers < 0:
+            raise ValueError("worker counts must be non-negative")
 
 
 @dataclass

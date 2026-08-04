@@ -11,6 +11,7 @@ class ExperimentConfigTests(unittest.TestCase):
         config = ExperimentConfig()
         self.assertEqual(config.model.d_model, 128)
         self.assertEqual(config.data.batch_size, 8)
+        self.assertEqual(config.data.val_num_workers, 0)
         self.assertEqual(config.training.ce_chunk_size, 1024)
         self.assertEqual(config.training.ce_backend, "tiled")
         self.assertEqual(config.runtime.compile_backend, "auto")

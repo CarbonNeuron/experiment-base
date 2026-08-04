@@ -61,13 +61,23 @@ def build_dataloaders(
     """Build train/validation loaders without knowing model or optimizer details."""
     train_data = load_wikitext(config.cache_dir, seq_len, "train")
     val_data = load_wikitext(config.cache_dir, seq_len, "validation")
-    loader_args = {
+    common_args = {
         "batch_size": config.batch_size,
-        "num_workers": config.num_workers,
         "pin_memory": device.type == "cuda",
     }
     train_loader = DataLoader(
-        train_data, shuffle=True, drop_last=True, **loader_args
+        train_data,
+        shuffle=True,
+        drop_last=True,
+        num_workers=config.num_workers,
+        persistent_workers=config.num_workers > 0,
+        **common_args,
     )
-    val_loader = DataLoader(val_data, shuffle=False, **loader_args)
+    val_loader = DataLoader(
+        val_data,
+        shuffle=False,
+        num_workers=config.val_num_workers,
+        persistent_workers=config.val_num_workers > 0,
+        **common_args,
+    )
     return train_loader, val_loader
