@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from torch.nn import functional as F
 
 from config import TransformerConfig
 from model import GenericTransformer, resolve_compile_backend
@@ -31,7 +32,13 @@ class GenericTransformerTests(unittest.TestCase):
             model, source = make_model(Path(directory))
             effective = model.effective_embeddings().detach()
 
-            torch.testing.assert_close(effective, source)
+            source_subset = F.normalize(source[:128], dim=-1)
+            effective_subset = F.normalize(effective[:128], dim=-1)
+            torch.testing.assert_close(
+                effective_subset @ effective_subset.T,
+                source_subset @ source_subset.T,
+            )
+            self.assertEqual(model.embeddings.log_magnitude.numel(), 1)
             self.assertNotIn(
                 "embeddings.directions", dict(model.named_parameters())
             )
@@ -43,7 +50,7 @@ class GenericTransformerTests(unittest.TestCase):
                 source.norm(dim=-1).mean(),
             )
             torch.testing.assert_close(
-                model.embeddings.rotation.weight,
+                model.embeddings.rotation.matrix,
                 torch.eye(model.config.d_model),
             )
             self.assertNotIn("embeddings.directions", model.state_dict())
@@ -71,8 +78,8 @@ class GenericTransformerTests(unittest.TestCase):
             loss.backward()
 
             self.assertIsNone(model.embeddings.directions.grad)
-            self.assertIsNotNone(model.embeddings.norms.grad)
-            self.assertIsNotNone(model.embeddings.rotation.weight.grad)
+            self.assertIsNotNone(model.embeddings.log_magnitude.grad)
+            self.assertIsNotNone(model.embeddings.rotation.generator.grad)
 
     def test_sampled_loss_uses_the_same_full_vocabulary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -91,7 +98,7 @@ class GenericTransformerTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(loss))
             loss.backward()
             self.assertEqual(model.vocab_size, 100_277)
-            self.assertIsNotNone(model.embeddings.norms.grad)
+            self.assertIsNotNone(model.embeddings.log_magnitude.grad)
 
     def test_vocab_and_compiled_encoder_come_from_embedding_module(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -10,15 +10,16 @@ OpenAI 128-dimensional SVD embedding table through the reusable
 - 6 pre-norm transformer blocks, 8 attention heads, and a 512-wide GELU FFN
 - PyTorch scaled dot-product causal attention
 - frozen unit SVD token directions
-- learned per-token magnitudes and an identity-initialized shared rotation
+- one positive learned global magnitude
+- an identity-initialized learned orthogonal rotation
 - tied input and output embeddings
 - learned absolute position embeddings whose initial mean L2 norm is derived
   from (and matches) the source SVD token embeddings
 
-Only the SVD directions are frozen. The token norms, rotation, position
-embeddings, transformer blocks, and final layer norm are trainable. Vocabulary
-size and tokenizer come directly from `svd-embeds`; they are not duplicated in
-the transformer configuration.
+Only the SVD directions are frozen. The global magnitude, orthogonal rotation,
+position embeddings, transformer blocks, and final layer norm are trainable.
+Vocabulary size and tokenizer come directly from `svd-embeds`; they are not
+duplicated in the transformer configuration.
 
 ## Setup
 
@@ -128,11 +129,14 @@ python train.py --compile --compile-mode default
 
 ## Embedding invariant
 
-If `D` is the frozen unit-direction table, `n` the learned per-token norms, and
-`R` the learned rotation initialized to identity, the tied table is:
+If `D` is the frozen unit-direction table, `log_s` one learned scalar, and `Q`
+the learned orthogonal rotation initialized to identity, the tied table is:
 
 ```text
-E = R(n[:, None] * D)
+E = exp(log_s) * D * Q^T
+Q = exp(0.5 * (A - A^T))
 ```
 
-At initialization this reconstructs the source SVD table exactly.
+The global scale and orthogonal transform preserve the source table's pairwise
+cosine similarities throughout training. The scale begins at the source mean
+token magnitude; the rotation begins at identity.

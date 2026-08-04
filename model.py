@@ -101,16 +101,16 @@ class TransformerBlock(nn.Module):
 
 
 class GenericTransformer(nn.Module):
-    """GPT-style LM with frozen SVD directions and trainable norms/rotation.
+    """GPT-style LM with cosine-preserving SVD token adaptation.
 
     The effective tied input/output embedding table is::
 
-        E = rotation(norms[:, None] * directions)
+        E = orthogonal_rotation(global_magnitude * directions)
 
-    ``directions`` is a frozen buffer. Per-token ``norms`` and the shared,
-    identity-initialized ``rotation`` are learned. Learned absolute position
-    vectors are initialized so their mean L2 norm equals the mean L2 norm of
-    the source SVD token embeddings.
+    ``directions`` is a frozen buffer. One positive global magnitude and an
+    identity-initialized orthogonal rotation are learned, preserving all token
+    cosine similarities. Learned absolute position vectors are initialized so
+    their mean L2 norm equals the source table's mean L2 norm.
     """
 
     def __init__(
