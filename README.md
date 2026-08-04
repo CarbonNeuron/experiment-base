@@ -56,8 +56,14 @@ computed in activation-checkpointed token chunks, avoiding a retained
 `--compile` applies `torch.compile` to the token/position/transformer encoder
 while leaving the checkpointed vocabulary-loss loop eager. This keeps compile
 graphs focused and preserves the loss's bounded-memory behavior. Select a mode
-with `--compile-mode`; an unsupported backend automatically falls back to eager
-execution.
+with `--compile-mode` and a backend with `--compile-backend`. The default
+`auto` backend uses Inductor when supported, but selects `aot_eager` on CUDA
+machines without Triton instead of failing during the first matrix multiply.
+Any remaining backend failure automatically falls back to eager execution.
+
+Native CUDA Inductor requires Triton. Standard Windows PyTorch installations
+often do not include it; install a compatible `triton-windows` build if you
+want Inductor acceleration there, then use `--compile-backend inductor`.
 
 Architecture and training settings are exposed as command-line arguments; run
 `python train.py --help` for the full list. `--d-model` selects the matching

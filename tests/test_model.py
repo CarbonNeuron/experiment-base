@@ -1,10 +1,15 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 
-from model import GenericTransformer, TransformerConfig
+from model import (
+    GenericTransformer,
+    TransformerConfig,
+    resolve_compile_backend,
+)
 
 
 def make_model(tmp_path: Path) -> tuple[GenericTransformer, torch.Tensor]:
@@ -80,15 +85,26 @@ class GenericTransformerTests(unittest.TestCase):
 
             with torch.no_grad():
                 eager = model.encode(input_ids)
-                model.compile_encoder(backend="eager")
+                selected = model.compile_encoder(backend="eager")
                 compiled = model.encode(input_ids)
 
+            self.assertEqual(selected, "eager")
             self.assertEqual(model.vocab_size, model.embeddings.num_embeddings)
             self.assertFalse(hasattr(model.config, "vocab_size"))
             self.assertFalse(
                 any("_orig_mod" in key for key in model.state_dict())
             )
             torch.testing.assert_close(compiled, eager)
+
+    def test_auto_compile_backend_avoids_inductor_without_triton(self) -> None:
+        with patch("model.importlib.util.find_spec", return_value=None):
+            self.assertEqual(
+                resolve_compile_backend("auto", "cuda"), "aot_eager"
+            )
+            self.assertEqual(resolve_compile_backend("auto", "cpu"), "inductor")
+        with patch("model.importlib.util.find_spec", return_value=object()):
+            self.assertEqual(resolve_compile_backend("auto", "cuda"), "inductor")
+        self.assertEqual(resolve_compile_backend("eager", "cuda"), "eager")
 
     def test_rejects_wrong_embedding_shape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

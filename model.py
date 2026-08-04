@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,6 +12,28 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from svd_embeds import OpenAIEmbedding
+
+
+COMPILE_BACKENDS = ("auto", "inductor", "aot_eager", "eager")
+
+
+def resolve_compile_backend(requested: str, device_type: str) -> str:
+    """Choose a usable compiler backend before the first training batch."""
+    if requested not in COMPILE_BACKENDS:
+        choices = ", ".join(COMPILE_BACKENDS)
+        raise ValueError(f"unknown compile backend {requested!r}; choose: {choices}")
+    if requested != "auto":
+        return requested
+    if device_type == "cuda":
+        try:
+            has_triton = importlib.util.find_spec("triton") is not None
+        except (ImportError, ValueError):
+            has_triton = False
+        if not has_triton:
+            return "aot_eager"
+    if device_type not in {"cpu", "cuda"}:
+        return "aot_eager"
+    return "inductor"
 
 
 @dataclass
@@ -148,6 +171,7 @@ class GenericTransformer(nn.Module):
             **embedding_kwargs,
         )
         self._compiled_encoder = None
+        self._compile_backend: str | None = None
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -192,12 +216,15 @@ class GenericTransformer(nn.Module):
         try:
             return self._compiled_encoder(input_ids)
         except Exception as error:
+            summary = str(error).splitlines()[0] or type(error).__name__
             warnings.warn(
-                f"compiled encoder failed; falling back to eager mode: {error}",
+                "compiled encoder failed; falling back to eager mode: "
+                f"{type(error).__name__}: {summary}",
                 RuntimeWarning,
                 stacklevel=2,
             )
             self._compiled_encoder = None
+            self._compile_backend = None
             return self._encode_hidden(input_ids)
 
     def compile_encoder(
@@ -205,24 +232,31 @@ class GenericTransformer(nn.Module):
         *,
         mode: str = "default",
         dynamic: bool = False,
-        backend: str | None = None,
-    ) -> None:
+        backend: str = "auto",
+    ) -> str:
         """Compile the hidden-state path while keeping chunked loss eager.
 
         Compilation is lazy. If the selected backend fails on its first real
         batch, :meth:`encode` warns once and transparently returns to eager
         execution.
         """
-        kwargs: dict[str, Any] = {"dynamic": dynamic}
-        if backend is None:
+        selected_backend = resolve_compile_backend(
+            backend, self.embeddings.directions.device.type
+        )
+        kwargs: dict[str, Any] = {
+            "backend": selected_backend,
+            "dynamic": dynamic,
+        }
+        if selected_backend == "inductor":
             kwargs["mode"] = mode
-        else:
-            kwargs["backend"] = backend
         self._compiled_encoder = torch.compile(self._encode_hidden, **kwargs)
+        self._compile_backend = selected_backend
+        return selected_backend
 
     def disable_compile(self) -> None:
         """Return the encoder to eager execution."""
         self._compiled_encoder = None
+        self._compile_backend = None
 
     def logits(self, hidden: Tensor) -> Tensor:
         """Project hidden states with the tied effective embedding table."""

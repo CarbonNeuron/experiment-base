@@ -16,7 +16,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from model import GenericTransformer, TransformerConfig
+from model import COMPILE_BACKENDS, GenericTransformer, TransformerConfig
 
 
 class TokenDataset(Dataset[Tensor]):
@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         choices=("default", "reduce-overhead", "max-autotune"),
         default="default",
         help="torch.compile mode for the token/transformer encoder path",
+    )
+    system.add_argument(
+        "--compile-backend",
+        choices=COMPILE_BACKENDS,
+        default="auto",
+        help="Compiler backend (auto avoids CUDA Inductor when Triton is absent)",
     )
     system.add_argument("--num-workers", type=int, default=2)
     system.add_argument("--cache-dir", type=Path, default=Path("data_cache"))
@@ -262,8 +268,19 @@ def main() -> None:
 
     if args.compile:
         try:
-            model.compile_encoder(mode=args.compile_mode)
-            print(f"torch.compile enabled for encoder ({args.compile_mode})")
+            compile_backend = model.compile_encoder(
+                mode=args.compile_mode,
+                backend=args.compile_backend,
+            )
+            print(
+                f"torch.compile enabled for encoder "
+                f"(backend={compile_backend}, mode={args.compile_mode})"
+            )
+            if args.compile_backend == "auto" and compile_backend == "aot_eager":
+                print(
+                    "Triton is unavailable for this accelerator; selected "
+                    "aot_eager instead of Inductor."
+                )
         except Exception as error:
             print(f"torch.compile unavailable; using eager encoder: {error}")
 
