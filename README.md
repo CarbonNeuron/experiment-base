@@ -61,6 +61,17 @@ and the sampled negatives, with importance correction. Validation always uses
 the exact tiled 100k-way loss. The ready-made `scripts/train_128d.py` preset
 enables sampled training and encoder compilation by default.
 
+Sampled training can optionally add static hard negatives retrieved from the
+frozen SVD directions. Enable it with `--hard-negatives`; it is disabled by
+default, and validation remains exact tiled cross-entropy. The production
+backend is a dependency-free, fingerprinted IVF index cached separately from
+model checkpoints. Exact chunked retrieval is available for tests and recall
+diagnostics. Candidate selection is detached, selected logits are recomputed
+with gradients, and the hard candidate-CE is added separately from the
+existing sampled-softmax correction. See
+[`output_retrieval/README.md`](output_retrieval/README.md) for the math,
+configuration, tradeoffs, and benchmark command.
+
 Training DataLoader workers are persistent across epochs. Validation defaults
 to `--val-num-workers 0` because spawning short-lived worker processes causes a
 long `0/50` pause on Windows; its contiguous cached-tensor slices do not benefit
@@ -96,6 +107,8 @@ Each module owns one concern:
 | `trainer.py` | Optimization, evaluation, progress, and checkpoints |
 | `experiment.py` | Compose configured model, data, and trainer |
 | `train.py` | Translate command-line arguments into configuration |
+| `output_retrieval/` | Static exact/IVF indexes, filtering, hard loss, and index I/O |
+| `benchmarks/` | Sampled versus hybrid output-training benchmark |
 
 Experiments can call `run_experiment()` directly and do not need to imitate the
 CLI. This keeps architecture changes independent from dataset and training-loop

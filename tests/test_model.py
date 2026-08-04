@@ -6,8 +6,13 @@ from unittest.mock import patch
 import torch
 from torch.nn import functional as F
 
-from config import TransformerConfig
+from config import (
+    HardNegativeIndexConfig,
+    HardNegativeRetrievalConfig,
+    TransformerConfig,
+)
 from model import GenericTransformer, resolve_compile_backend
+from output_retrieval import ExactStaticOutputIndex, HardNegativeTrainer
 
 
 def make_model(tmp_path: Path) -> tuple[GenericTransformer, torch.Tensor]:
@@ -81,6 +86,21 @@ class GenericTransformerTests(unittest.TestCase):
             self.assertIsNotNone(model.embeddings.log_magnitude.grad)
             self.assertIsNotNone(model.embeddings.rotation.generator.grad)
 
+    def test_fixed_space_rotation_orientation_matches_direct_logits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model, _ = make_model(Path(directory))
+            with torch.no_grad():
+                model.embeddings.rotation.generator.normal_(std=0.2)
+            hidden = torch.randn(9, model.config.d_model)
+            token_ids = torch.randint(0, model.vocab_size, (9,))
+            directions = model.embeddings.directions[token_ids]
+            effective = model.embeddings.token_embeddings(token_ids)
+            direct = (hidden * effective).sum(dim=-1)
+            transformed = model.embeddings.magnitude * (
+                model.transform_hidden_to_fixed_space(hidden) * directions
+            ).sum(dim=-1)
+            torch.testing.assert_close(direct, transformed, rtol=1e-5, atol=1e-5)
+
     def test_sampled_loss_uses_the_same_full_vocabulary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model, _ = make_model(Path(directory))
@@ -99,6 +119,71 @@ class GenericTransformerTests(unittest.TestCase):
             loss.backward()
             self.assertEqual(model.vocab_size, 100_277)
             self.assertIsNotNone(model.embeddings.log_magnitude.grad)
+
+    def test_disabled_hard_path_is_sampled_only_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model, _ = make_model(Path(directory))
+            input_ids = torch.randint(0, model.vocab_size, (2, 8))
+            targets = torch.randint(0, model.vocab_size, (2, 8))
+            torch.manual_seed(101)
+            _, baseline = model(
+                input_ids,
+                targets,
+                loss_chunk_size=3,
+                loss_backend="sampled",
+                loss_negative_samples=31,
+            )
+            torch.manual_seed(101)
+            _, disabled = model(
+                input_ids,
+                targets,
+                loss_chunk_size=3,
+                loss_backend="sampled",
+                loss_negative_samples=31,
+                hard_negative_trainer=None,
+                hard_loss_weight=0.25,
+            )
+            torch.testing.assert_close(disabled, baseline, rtol=0, atol=0)
+            self.assertIsNone(model.last_hard_negative_metrics)
+
+    def test_hybrid_forward_avoids_full_projection_and_backpropagates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model, _ = make_model(Path(directory))
+            config = HardNegativeRetrievalConfig(
+                enabled=True,
+                backend="exact",
+                hard_k=3,
+                retrieve_extra=2,
+                warmup_steps=0,
+                index=HardNegativeIndexConfig(vocab_chunk_size=8192),
+            )
+            directions = F.normalize(model.embeddings.directions.float(), dim=-1)
+            index = ExactStaticOutputIndex(directions, vocab_chunk_size=8192)
+            trainer = HardNegativeTrainer(index, model.embeddings.directions, config)
+            input_ids = torch.randint(0, model.vocab_size, (2, 4))
+            targets = torch.randint(0, model.vocab_size, (2, 4))
+            with patch.object(
+                model.embeddings,
+                "project",
+                side_effect=AssertionError("full projection must not run"),
+            ):
+                logits, loss = model(
+                    input_ids,
+                    targets,
+                    loss_chunk_size=4,
+                    loss_backend="sampled",
+                    loss_negative_samples=31,
+                    hard_negative_trainer=trainer,
+                    hard_loss_weight=0.25,
+                )
+            self.assertIsNone(logits)
+            assert loss is not None
+            loss.backward()
+            self.assertIsNotNone(model.embeddings.log_magnitude.grad)
+            self.assertGreater(
+                model.embeddings.rotation.generator.grad.abs().sum().item(), 0
+            )
+            self.assertIsNotNone(model.last_hard_negative_metrics)
 
     def test_vocab_and_compiled_encoder_come_from_embedding_module(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -9,9 +9,14 @@ from config import (
     COMPILE_BACKENDS,
     COMPILE_MODES,
     DTYPES,
+    HARD_NEGATIVE_BACKENDS,
+    HARD_NEGATIVE_LOSSES,
     LOSS_BACKENDS,
     DataConfig,
     ExperimentConfig,
+    HardNegativeDiagnosticsConfig,
+    HardNegativeIndexConfig,
+    HardNegativeRetrievalConfig,
     RuntimeConfig,
     TrainingConfig,
     TransformerConfig,
@@ -79,6 +84,52 @@ def parse_args() -> argparse.Namespace:
     training.add_argument("--save-every", type=int, default=1000)
     training.add_argument("--seed", type=int, default=42)
 
+    hard = parser.add_argument_group("hard-negative retrieval")
+    hard.add_argument("--hard-negatives", action="store_true")
+    hard.add_argument(
+        "--hard-negative-backend",
+        choices=HARD_NEGATIVE_BACKENDS,
+        default="ivf",
+    )
+    hard.add_argument("--hard-k", type=int, default=32)
+    hard.add_argument("--hard-retrieve-extra", type=int, default=8)
+    hard.add_argument("--hard-query-chunk-size", type=int, default=1024)
+    hard.add_argument("--hard-loss-weight", type=float, default=0.25)
+    hard.add_argument("--hard-warmup-steps", type=int, default=1000)
+    hard.add_argument(
+        "--hard-loss-type", choices=HARD_NEGATIVE_LOSSES, default="candidate_ce"
+    )
+    hard.add_argument("--hard-pairwise-margin", type=float, default=0.0)
+    hard.add_argument(
+        "--hard-normalize-directions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    hard.add_argument(
+        "--hard-normalize-queries",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    hard.add_argument("--hard-position-fraction", type=float, default=1.0)
+    hard.add_argument("--hard-max-positions", type=int)
+    hard.add_argument(
+        "--hard-invalid-token-ids",
+        default="",
+        help="Comma-separated vocabulary IDs excluded from retrieved negatives",
+    )
+    hard.add_argument("--hard-index-path", type=Path)
+    hard.add_argument("--hard-index-rebuild", action="store_true")
+    hard.add_argument("--hard-index-clusters", type=int, default=512)
+    hard.add_argument("--hard-index-nprobe", type=int, default=8)
+    hard.add_argument("--hard-index-max-candidates", type=int, default=2048)
+    hard.add_argument("--hard-index-build-batch-size", type=int, default=8192)
+    hard.add_argument("--hard-index-kmeans-iterations", type=int, default=8)
+    hard.add_argument("--hard-index-vocab-chunk-size", type=int, default=8192)
+    hard.add_argument("--hard-index-seed", type=int, default=0)
+    hard.add_argument("--hard-log-interval", type=int, default=100)
+    hard.add_argument("--hard-exact-recall-interval", type=int, default=0)
+    hard.add_argument("--hard-exact-recall-query-count", type=int, default=64)
+
     runtime = parser.add_argument_group("runtime")
     runtime.add_argument("--device", default="auto")
     runtime.add_argument("--dtype", choices=DTYPES, default="bf16")
@@ -134,6 +185,42 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             eval_batches=args.eval_batches,
             save_every=args.save_every,
             seed=args.seed,
+            hard_negative_retrieval=HardNegativeRetrievalConfig(
+                enabled=args.hard_negatives,
+                backend=args.hard_negative_backend,
+                hard_k=args.hard_k,
+                retrieve_extra=args.hard_retrieve_extra,
+                query_chunk_size=args.hard_query_chunk_size,
+                loss_weight=args.hard_loss_weight,
+                warmup_steps=args.hard_warmup_steps,
+                loss_type=args.hard_loss_type,
+                pairwise_margin=args.hard_pairwise_margin,
+                normalize_directions=args.hard_normalize_directions,
+                normalize_queries=args.hard_normalize_queries,
+                position_fraction=args.hard_position_fraction,
+                max_positions_per_batch=args.hard_max_positions,
+                invalid_token_ids=tuple(
+                    int(value)
+                    for value in args.hard_invalid_token_ids.split(",")
+                    if value.strip()
+                ),
+                index=HardNegativeIndexConfig(
+                    path=args.hard_index_path,
+                    rebuild=args.hard_index_rebuild,
+                    num_clusters=args.hard_index_clusters,
+                    nprobe=args.hard_index_nprobe,
+                    max_candidates_per_query=args.hard_index_max_candidates,
+                    build_batch_size=args.hard_index_build_batch_size,
+                    kmeans_iterations=args.hard_index_kmeans_iterations,
+                    vocab_chunk_size=args.hard_index_vocab_chunk_size,
+                    seed=args.hard_index_seed,
+                ),
+                diagnostics=HardNegativeDiagnosticsConfig(
+                    log_interval=args.hard_log_interval,
+                    exact_recall_interval=args.hard_exact_recall_interval,
+                    exact_recall_query_count=args.hard_exact_recall_query_count,
+                ),
+            ),
         ),
         runtime=RuntimeConfig(
             device=args.device,

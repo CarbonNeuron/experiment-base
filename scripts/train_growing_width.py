@@ -10,6 +10,8 @@ import torch  # noqa: E402
 from config import (  # noqa: E402
     DataConfig,
     GrowingWidthConfig,
+    HardNegativeIndexConfig,
+    HardNegativeRetrievalConfig,
     RuntimeConfig,
     TrainingConfig,
 )
@@ -31,6 +33,19 @@ TRAINING_CONFIG = TrainingConfig(
     grad_accum_steps=1,
     ce_backend="sampled",
     ce_negative_samples=4096,
+    hard_negative_retrieval=HardNegativeRetrievalConfig(
+        enabled=True,
+        hard_k=32,
+        query_chunk_size=1024,
+        loss_weight=0.25,
+        warmup_steps=1000,
+        max_positions_per_batch=4096,
+        index=HardNegativeIndexConfig(
+            num_clusters=512,
+            nprobe=8,
+            max_candidates_per_query=2048,
+        ),
+    ),
 )
 RUNTIME_CONFIG = RuntimeConfig(
     compile=True,

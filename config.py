@@ -11,6 +11,8 @@ COMPILE_BACKENDS = ("auto", "inductor", "aot_eager", "eager")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
 DTYPES = ("fp32", "bf16", "fp16")
 LOSS_BACKENDS = ("tiled", "sampled", "checkpoint", "full")
+HARD_NEGATIVE_BACKENDS = ("ivf", "exact")
+HARD_NEGATIVE_LOSSES = ("candidate_ce", "pairwise")
 
 
 @dataclass
@@ -96,6 +98,104 @@ class DataConfig:
 
 
 @dataclass
+class HardNegativeIndexConfig:
+    """Settings for the derived static output-direction index."""
+
+    path: Path | None = None
+    rebuild: bool = False
+    num_clusters: int = 512
+    nprobe: int = 8
+    max_candidates_per_query: int = 2048
+    build_batch_size: int = 8192
+    kmeans_iterations: int = 8
+    vocab_chunk_size: int = 8192
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        self.path = Path(self.path) if self.path is not None else None
+        for name in (
+            "num_clusters",
+            "nprobe",
+            "max_candidates_per_query",
+            "build_batch_size",
+            "kmeans_iterations",
+            "vocab_chunk_size",
+        ):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"hard-negative index {name} must be positive")
+        if self.nprobe > self.num_clusters:
+            raise ValueError("hard-negative index nprobe cannot exceed num_clusters")
+
+
+@dataclass
+class HardNegativeDiagnosticsConfig:
+    """Cadence for optional retrieval diagnostics."""
+
+    log_interval: int = 100
+    exact_recall_interval: int = 0
+    exact_recall_query_count: int = 64
+
+    def __post_init__(self) -> None:
+        if min(self.log_interval, self.exact_recall_interval) < 0:
+            raise ValueError("hard-negative diagnostic intervals must be non-negative")
+        if self.exact_recall_query_count <= 0:
+            raise ValueError("exact_recall_query_count must be positive")
+
+
+@dataclass
+class HardNegativeRetrievalConfig:
+    """Optional auxiliary loss over statically retrieved output directions."""
+
+    enabled: bool = False
+    backend: str = "ivf"
+    hard_k: int = 32
+    retrieve_extra: int = 8
+    query_chunk_size: int = 1024
+    loss_weight: float = 0.25
+    warmup_steps: int = 1000
+    loss_type: str = "candidate_ce"
+    pairwise_margin: float = 0.0
+    normalize_directions: bool = True
+    normalize_queries: bool = True
+    position_fraction: float = 1.0
+    max_positions_per_batch: int | None = None
+    ignore_index: int = -1
+    invalid_token_ids: tuple[int, ...] = ()
+    index: HardNegativeIndexConfig = field(default_factory=HardNegativeIndexConfig)
+    diagnostics: HardNegativeDiagnosticsConfig = field(
+        default_factory=HardNegativeDiagnosticsConfig
+    )
+
+    def __post_init__(self) -> None:
+        if isinstance(self.index, dict):
+            self.index = HardNegativeIndexConfig(**self.index)
+        if isinstance(self.diagnostics, dict):
+            self.diagnostics = HardNegativeDiagnosticsConfig(**self.diagnostics)
+        self.invalid_token_ids = tuple(self.invalid_token_ids)
+        if self.backend not in HARD_NEGATIVE_BACKENDS:
+            raise ValueError(
+                f"hard-negative backend must be one of {HARD_NEGATIVE_BACKENDS}"
+            )
+        if self.loss_type not in HARD_NEGATIVE_LOSSES:
+            raise ValueError(
+                f"hard-negative loss_type must be one of {HARD_NEGATIVE_LOSSES}"
+            )
+        if self.hard_k <= 0 or self.query_chunk_size <= 0:
+            raise ValueError("hard_k and query_chunk_size must be positive")
+        if self.retrieve_extra < 0 or self.warmup_steps < 0:
+            raise ValueError("retrieve_extra and warmup_steps must be non-negative")
+        if self.loss_weight < 0:
+            raise ValueError("hard-negative loss_weight must be non-negative")
+        if not 0.0 < self.position_fraction <= 1.0:
+            raise ValueError("position_fraction must be in (0, 1]")
+        if (
+            self.max_positions_per_batch is not None
+            and self.max_positions_per_batch <= 0
+        ):
+            raise ValueError("max_positions_per_batch must be positive when set")
+
+
+@dataclass
 class TrainingConfig:
     """Optimization, evaluation, and checkpoint cadence."""
 
@@ -113,8 +213,15 @@ class TrainingConfig:
     eval_batches: int = 50
     save_every: int = 1000
     seed: int = 42
+    hard_negative_retrieval: HardNegativeRetrievalConfig = field(
+        default_factory=HardNegativeRetrievalConfig
+    )
 
     def __post_init__(self) -> None:
+        if isinstance(self.hard_negative_retrieval, dict):
+            self.hard_negative_retrieval = HardNegativeRetrievalConfig(
+                **self.hard_negative_retrieval
+            )
         if self.epochs <= 0 or self.grad_accum_steps <= 0:
             raise ValueError("epochs and grad_accum_steps must be positive")
         if self.lr <= 0 or self.max_grad_norm <= 0:

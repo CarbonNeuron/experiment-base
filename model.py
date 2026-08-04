@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import Tensor, nn
@@ -13,6 +13,39 @@ from torch.nn import functional as F
 from svd_embeds import OpenAIEmbedding
 
 from config import COMPILE_BACKENDS, GrowingWidthConfig, TransformerConfig
+
+if TYPE_CHECKING:
+    from output_retrieval.hard_negative_loss import HardNegativeTrainer
+
+
+def _combine_hard_negative_loss(
+    model: nn.Module,
+    hidden: Tensor,
+    targets: Tensor,
+    sampled_loss: Tensor,
+    trainer: "HardNegativeTrainer | None",
+    hard_loss_weight: float,
+) -> Tensor:
+    """Add the auxiliary hard loss without changing the sampled estimator."""
+    if trainer is None:
+        model.last_hard_negative_metrics = None
+        return sampled_loss
+    embeddings = model.embeddings
+    hard_loss, metrics = trainer.compute(
+        hidden,
+        targets,
+        embeddings.rotation.matrix,
+        embeddings.magnitude,
+    )
+    total = sampled_loss + hard_loss_weight * hard_loss
+    metrics["sampled_loss"] = sampled_loss.detach()
+    metrics["weighted_hard_loss"] = (hard_loss_weight * hard_loss).detach()
+    metrics["hard_loss_weight"] = torch.tensor(
+        hard_loss_weight, device=sampled_loss.device
+    )
+    metrics["total_loss"] = total.detach()
+    model.last_hard_negative_metrics = metrics
+    return total
 
 
 def resolve_compile_backend(requested: str, device_type: str) -> str:
@@ -144,6 +177,7 @@ class GenericTransformer(nn.Module):
         )
         self._compiled_encoder = None
         self._compile_backend: str | None = None
+        self.last_hard_negative_metrics: dict[str, Tensor] | None = None
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -234,6 +268,10 @@ class GenericTransformer(nn.Module):
         """Project hidden states with the tied effective embedding table."""
         return self.embeddings.project(hidden)
 
+    def transform_hidden_to_fixed_space(self, hidden: Tensor) -> Tensor:
+        """Return row-batch queries ``hidden @ Q`` for frozen directions."""
+        return hidden @ self.embeddings.rotation.matrix
+
     def forward(
         self,
         input_ids: Tensor,
@@ -242,6 +280,8 @@ class GenericTransformer(nn.Module):
         loss_chunk_size: int = 0,
         loss_backend: str = "tiled",
         loss_negative_samples: int = 4096,
+        hard_negative_trainer: "HardNegativeTrainer | None" = None,
+        hard_loss_weight: float = 0.0,
     ) -> tuple[Tensor | None, Tensor | None]:
         hidden = self.encode(input_ids)
         loss = None
@@ -249,12 +289,20 @@ class GenericTransformer(nn.Module):
             if targets.shape != input_ids.shape:
                 raise ValueError("targets must have the same shape as input_ids")
             if loss_chunk_size > 0:
-                loss = self.embeddings.cross_entropy(
+                sampled_loss = self.embeddings.cross_entropy(
                     hidden,
                     targets,
                     chunk_size=loss_chunk_size,
                     backend=loss_backend,
                     num_negative_samples=loss_negative_samples,
+                )
+                loss = _combine_hard_negative_loss(
+                    self,
+                    hidden,
+                    targets,
+                    sampled_loss,
+                    hard_negative_trainer,
+                    hard_loss_weight,
                 )
                 return None, loss
 
@@ -360,6 +408,7 @@ class GrowingWidthTransformer(nn.Module):
         )
         self._compiled_encoder = None
         self._compile_backend: str | None = None
+        self.last_hard_negative_metrics: dict[str, Tensor] | None = None
 
     @property
     def layer_widths(self) -> list[int]:
@@ -465,6 +514,10 @@ class GrowingWidthTransformer(nn.Module):
         """Project embedding-space hidden states to tied token logits."""
         return self.embeddings.project(hidden)
 
+    def transform_hidden_to_fixed_space(self, hidden: Tensor) -> Tensor:
+        """Return row-batch queries ``hidden @ Q`` for frozen directions."""
+        return hidden @ self.embeddings.rotation.matrix
+
     def forward(
         self,
         input_ids: Tensor,
@@ -473,6 +526,8 @@ class GrowingWidthTransformer(nn.Module):
         loss_chunk_size: int = 0,
         loss_backend: str = "tiled",
         loss_negative_samples: int = 4096,
+        hard_negative_trainer: "HardNegativeTrainer | None" = None,
+        hard_loss_weight: float = 0.0,
     ) -> tuple[Tensor | None, Tensor | None]:
         hidden = self.encode(input_ids)
         loss = None
@@ -480,12 +535,20 @@ class GrowingWidthTransformer(nn.Module):
             if targets.shape != input_ids.shape:
                 raise ValueError("targets must have the same shape as input_ids")
             if loss_chunk_size > 0:
-                loss = self.embeddings.cross_entropy(
+                sampled_loss = self.embeddings.cross_entropy(
                     hidden,
                     targets,
                     chunk_size=loss_chunk_size,
                     backend=loss_backend,
                     num_negative_samples=loss_negative_samples,
+                )
+                loss = _combine_hard_negative_loss(
+                    self,
+                    hidden,
+                    targets,
+                    sampled_loss,
+                    hard_negative_trainer,
+                    hard_loss_weight,
                 )
                 return None, loss
 
