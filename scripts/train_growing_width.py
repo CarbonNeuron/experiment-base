@@ -25,7 +25,7 @@ MODEL_CONFIG = GrowingWidthConfig(
     d_ff_ratio=4.0,
     max_seq_len=512,
 )
-DATA_CONFIG = DataConfig(batch_size=8, num_workers=2)
+DATA_CONFIG = DataConfig(batch_size=128, num_workers=2)
 TRAINING_CONFIG = TrainingConfig(
     epochs=3,
     grad_accum_steps=1,
