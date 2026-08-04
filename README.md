@@ -16,7 +16,9 @@ OpenAI 128-dimensional SVD embedding table through the reusable
   from (and matches) the source SVD token embeddings
 
 Only the SVD directions are frozen. The token norms, rotation, position
-embeddings, transformer blocks, and final layer norm are trainable.
+embeddings, transformer blocks, and final layer norm are trainable. Vocabulary
+size and tokenizer come directly from `svd-embeds`; they are not duplicated in
+the transformer configuration.
 
 ## Setup
 
@@ -51,6 +53,12 @@ computed in activation-checkpointed token chunks, avoiding a retained
 `[batch, sequence, 100277]` logits tensor. Adjust memory/throughput with
 `--ce-chunk-size`; use `0` for the conventional full-logit loss.
 
+`--compile` applies `torch.compile` to the token/position/transformer encoder
+while leaving the checkpointed vocabulary-loss loop eager. This keeps compile
+graphs focused and preserves the loss's bounded-memory behavior. Select a mode
+with `--compile-mode`; an unsupported backend automatically falls back to eager
+execution.
+
 Architecture and training settings are exposed as command-line arguments; run
 `python train.py --help` for the full list. `--d-model` selects the matching
 OpenAI SVD width and must be one of the released artifact dimensions.
@@ -59,6 +67,12 @@ For a quick GPU check without committing to a full run:
 
 ```bash
 python train.py --max-steps 2 --eval-every 0 --save-every 0
+```
+
+Enable encoder compilation with:
+
+```bash
+python train.py --compile --compile-mode default
 ```
 
 ## Embedding invariant

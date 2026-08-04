@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from svd_embeds import OpenAIEmbedding
@@ -19,7 +21,6 @@ class TransformerConfig:
     n_heads: int = 8
     n_layers: int = 6
     d_ff: int = 512
-    vocab_size: int = 100_277  # cl100k_base
     max_seq_len: int = 512
     dropout: float = 0.1
     layer_norm_eps: float = 1e-5
@@ -29,8 +30,8 @@ class TransformerConfig:
             raise ValueError("model dimensions and layer counts must be positive")
         if self.d_model % self.n_heads:
             raise ValueError("d_model must be divisible by n_heads")
-        if self.d_ff <= 0 or self.vocab_size <= 0 or self.max_seq_len <= 0:
-            raise ValueError("d_ff, vocab_size, and max_seq_len must be positive")
+        if self.d_ff <= 0 or self.max_seq_len <= 0:
+            raise ValueError("d_ff and max_seq_len must be positive")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
 
@@ -146,11 +147,7 @@ class GenericTransformer(nn.Module):
             max_seq_len=config.max_seq_len,
             **embedding_kwargs,
         )
-        if self.embeddings.num_embeddings != config.vocab_size:
-            raise ValueError(
-                f"config vocab_size={config.vocab_size} does not match "
-                f"embedding vocabulary={self.embeddings.num_embeddings}"
-            )
+        self._compiled_encoder = None
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -168,6 +165,17 @@ class GenericTransformer(nn.Module):
         """Return the tied, trainable embedding table."""
         return self.embeddings.weight
 
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size supplied by the embedding artifact."""
+        return self.embeddings.num_embeddings
+
+    def _encode_hidden(self, input_ids: Tensor) -> Tensor:
+        hidden = self.embedding_dropout(self.embeddings(input_ids))
+        for block in self.blocks:
+            hidden = block(hidden)
+        return self.final_norm(hidden)
+
     def encode(self, input_ids: Tensor) -> Tensor:
         """Return final hidden states without materializing vocabulary logits."""
         if input_ids.ndim != 2:
@@ -179,10 +187,42 @@ class GenericTransformer(nn.Module):
                 f"{self.config.max_seq_len}"
             )
 
-        hidden = self.embedding_dropout(self.embeddings(input_ids))
-        for block in self.blocks:
-            hidden = block(hidden)
-        return self.final_norm(hidden)
+        if self._compiled_encoder is None:
+            return self._encode_hidden(input_ids)
+        try:
+            return self._compiled_encoder(input_ids)
+        except Exception as error:
+            warnings.warn(
+                f"compiled encoder failed; falling back to eager mode: {error}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._compiled_encoder = None
+            return self._encode_hidden(input_ids)
+
+    def compile_encoder(
+        self,
+        *,
+        mode: str = "default",
+        dynamic: bool = False,
+        backend: str | None = None,
+    ) -> None:
+        """Compile the hidden-state path while keeping chunked loss eager.
+
+        Compilation is lazy. If the selected backend fails on its first real
+        batch, :meth:`encode` warns once and transparently returns to eager
+        execution.
+        """
+        kwargs: dict[str, Any] = {"dynamic": dynamic}
+        if backend is None:
+            kwargs["mode"] = mode
+        else:
+            kwargs["backend"] = backend
+        self._compiled_encoder = torch.compile(self._encode_hidden, **kwargs)
+
+    def disable_compile(self) -> None:
+        """Return the encoder to eager execution."""
+        self._compiled_encoder = None
 
     def logits(self, hidden: Tensor) -> Tensor:
         """Project hidden states with the tied effective embedding table."""

@@ -76,6 +76,12 @@ def parse_args() -> argparse.Namespace:
     system.add_argument("--device", default="auto")
     system.add_argument("--dtype", choices=("fp32", "bf16", "fp16"), default="bf16")
     system.add_argument("--compile", action="store_true")
+    system.add_argument(
+        "--compile-mode",
+        choices=("default", "reduce-overhead", "max-autotune"),
+        default="default",
+        help="torch.compile mode for the token/transformer encoder path",
+    )
     system.add_argument("--num-workers", type=int, default=2)
     system.add_argument("--cache-dir", type=Path, default=Path("data_cache"))
     system.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
@@ -129,7 +135,7 @@ def autocast_context(device: torch.device, dtype: torch.dtype, enabled: bool):
 
 @torch.no_grad()
 def evaluate(
-    model: nn.Module,
+    model: GenericTransformer,
     loader: DataLoader[Tensor],
     device: torch.device,
     dtype: torch.dtype,
@@ -166,17 +172,16 @@ def evaluate(
 
 def save_checkpoint(
     path: Path,
-    model: nn.Module,
+    model: GenericTransformer,
     optimizer: AdamW,
     scheduler: LambdaLR,
     config: TransformerConfig,
     step: int,
     epoch: int,
 ) -> None:
-    unwrapped = getattr(model, "_orig_mod", model)
     torch.save(
         {
-            "model": unwrapped.state_dict(),
+            "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "config": asdict(config),
@@ -205,21 +210,22 @@ def main() -> None:
     if device.type == "cpu" and dtype == torch.float16:
         amp_enabled = False
 
-    tokenizer = get_tokenizer()
     config = TransformerConfig(
         d_model=args.d_model,
         n_heads=args.n_heads,
         n_layers=args.n_layers,
         d_ff=args.d_ff,
-        vocab_size=tokenizer.n_vocab,
         max_seq_len=args.seq_len,
         dropout=args.dropout,
     )
-    model: nn.Module = GenericTransformer(config, args.embed_path).to(device)
+    model = GenericTransformer(config, args.embed_path).to(device)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = model.num_parameters()  # type: ignore[attr-defined]
+    total = model.num_parameters()
     print(f"device={device} dtype={args.dtype}")
-    print(f"parameters={total:,} total, {trainable:,} trainable")
+    print(
+        f"vocab={model.vocab_size:,} parameters={total:,} total, "
+        f"{trainable:,} trainable"
+    )
 
     train_data = load_wikitext(args.cache_dir, args.seq_len, "train")
     val_data = load_wikitext(args.cache_dir, args.seq_len, "validation")
@@ -255,7 +261,11 @@ def main() -> None:
         print(f"resumed {args.resume} at step {step}")
 
     if args.compile:
-        model = torch.compile(model)
+        try:
+            model.compile_encoder(mode=args.compile_mode)
+            print(f"torch.compile enabled for encoder ({args.compile_mode})")
+        except Exception as error:
+            print(f"torch.compile unavailable; using eager encoder: {error}")
 
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     optimizer.zero_grad(set_to_none=True)
