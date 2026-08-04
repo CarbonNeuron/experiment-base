@@ -168,6 +168,7 @@ class Trainer:
                     chunk[:, 1:],
                     loss_chunk_size=self.config.ce_chunk_size,
                     loss_backend="tiled",
+                    use_compiled_encoder=False,
                 )
             assert loss is not None
             total_loss += loss.float().item()
