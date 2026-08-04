@@ -1,4 +1,4 @@
-"""A conventional decoder-only transformer with frozen SVD token directions."""
+"""Decoder-only transformer variants with frozen SVD token directions."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from svd_embeds import OpenAIEmbedding
 
-from config import COMPILE_BACKENDS, TransformerConfig
+from config import COMPILE_BACKENDS, GrowingWidthConfig, TransformerConfig
 
 
 def resolve_compile_backend(requested: str, device_type: str) -> str:
@@ -268,6 +268,247 @@ class GenericTransformer(nn.Module):
         return logits, loss
 
     def num_parameters(self, trainable_only: bool = False) -> int:
+        parameters = sum(
+            parameter.numel()
+            for parameter in self.parameters()
+            if not trainable_only or parameter.requires_grad
+        )
+        if not trainable_only:
+            parameters += self.embeddings.directions.numel()
+        return parameters
+
+
+class GrowingCausalSelfAttention(nn.Module):
+    """Causal self-attention parameterized by one layer's specific width."""
+
+    def __init__(self, width: int, n_heads: int, dropout: float) -> None:
+        super().__init__()
+        self.width = width
+        self.n_heads = n_heads
+        self.head_dim = width // n_heads
+        self.qkv = nn.Linear(width, 3 * width, bias=False)
+        self.out_proj = nn.Linear(width, width, bias=False)
+        self.dropout = dropout
+        self.resid_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: Tensor) -> Tensor:
+        batch_size, seq_len, _ = x.shape
+        query, key, value = self.qkv(x).split(self.width, dim=-1)
+
+        def split_heads(tensor: Tensor) -> Tensor:
+            return tensor.view(
+                batch_size, seq_len, self.n_heads, self.head_dim
+            ).transpose(1, 2)
+
+        query, key, value = map(split_heads, (query, key, value))
+        attended = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True,
+        )
+        attended = attended.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, self.width
+        )
+        return self.resid_dropout(self.out_proj(attended))
+
+
+class GrowingTransformerBlock(nn.Module):
+    """A pre-norm transformer block operating at one scheduled width."""
+
+    def __init__(
+        self,
+        width: int,
+        n_heads: int,
+        d_ff_ratio: float,
+        dropout: float,
+        layer_norm_eps: float,
+    ) -> None:
+        super().__init__()
+        d_ff = round(d_ff_ratio * width)
+        self.attn_norm = nn.LayerNorm(width, eps=layer_norm_eps)
+        self.attn = GrowingCausalSelfAttention(width, n_heads, dropout)
+        self.ffn_norm = nn.LayerNorm(width, eps=layer_norm_eps)
+        self.ffn = nn.Sequential(
+            nn.Linear(width, d_ff),
+            nn.GELU(),
+            nn.Linear(d_ff, width),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = x + self.attn(self.attn_norm(x))
+        return x + self.ffn(self.ffn_norm(x))
+
+
+class GrowingWidthTransformer(nn.Module):
+    """Decoder-only transformer whose hidden width grows between layers."""
+
+    def __init__(
+        self,
+        config: GrowingWidthConfig | dict[str, Any] | None = None,
+        embed_path: str | Path | None = None,
+    ) -> None:
+        super().__init__()
+        if config is None:
+            config = GrowingWidthConfig()
+        elif isinstance(config, dict):
+            config = GrowingWidthConfig(**config)
+        self.config = config
+        self.widths = config.layer_widths
+
+        self.embedding_dropout = nn.Dropout(config.dropout)
+        self.blocks = nn.ModuleList(
+            GrowingTransformerBlock(
+                width,
+                config.n_heads,
+                config.d_ff_ratio,
+                config.dropout,
+                config.layer_norm_eps,
+            )
+            for width in self.widths
+        )
+        self.projections = nn.ModuleList(
+            nn.Linear(source, target, bias=False)
+            if source != target
+            else nn.Identity()
+            for source, target in zip(self.widths, self.widths[1:])
+        )
+        final_width = self.widths[-1]
+        self.final_norm = nn.LayerNorm(
+            final_width, eps=config.layer_norm_eps
+        )
+        self.output_projection = nn.Linear(
+            final_width, config.d_embed, bias=False
+        )
+
+        self.apply(GenericTransformer._init_weights)
+        embedding_kwargs = (
+            {"embedding_path": embed_path} if embed_path is not None else {}
+        )
+        self.embeddings = OpenAIEmbedding(
+            config.d_embed,
+            max_seq_len=config.max_seq_len,
+            **embedding_kwargs,
+        )
+        self._compiled_encoder = None
+        self._compile_backend: str | None = None
+
+    @property
+    def layer_widths(self) -> list[int]:
+        """A copy of the widths used by successive blocks."""
+        return list(self.widths)
+
+    def effective_embeddings(self) -> Tensor:
+        """Return the tied, trainable embedding table."""
+        return self.embeddings.weight
+
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size supplied by the embedding artifact."""
+        return self.embeddings.num_embeddings
+
+    def _encode_hidden(self, input_ids: Tensor) -> Tensor:
+        hidden = self.embedding_dropout(self.embeddings(input_ids))
+        for layer_index, block in enumerate(self.blocks):
+            hidden = block(hidden)
+            if layer_index < len(self.projections):
+                hidden = self.projections[layer_index](hidden)
+        hidden = self.final_norm(hidden)
+        return self.output_projection(hidden)
+
+    def encode(self, input_ids: Tensor) -> Tensor:
+        """Return final hidden states in the tied embedding space."""
+        if input_ids.ndim != 2:
+            raise ValueError("input_ids must have shape [batch, sequence]")
+        seq_len = input_ids.size(1)
+        if seq_len > self.config.max_seq_len:
+            raise ValueError(
+                f"sequence length {seq_len} exceeds max_seq_len="
+                f"{self.config.max_seq_len}"
+            )
+
+        if self._compiled_encoder is None:
+            return self._encode_hidden(input_ids)
+        try:
+            return self._compiled_encoder(input_ids)
+        except Exception as error:
+            summary = str(error).splitlines()[0] or type(error).__name__
+            warnings.warn(
+                "compiled encoder failed; falling back to eager mode: "
+                f"{type(error).__name__}: {summary}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.disable_compile()
+            return self._encode_hidden(input_ids)
+
+    def compile_encoder(
+        self,
+        *,
+        mode: str = "default",
+        dynamic: bool = False,
+        backend: str = "auto",
+    ) -> str:
+        """Compile the hidden-state path while keeping embedding loss eager."""
+        selected_backend = resolve_compile_backend(
+            backend, self.embeddings.directions.device.type
+        )
+        kwargs: dict[str, Any] = {
+            "backend": selected_backend,
+            "dynamic": dynamic,
+        }
+        if selected_backend == "inductor":
+            kwargs["mode"] = mode
+        self._compiled_encoder = torch.compile(self._encode_hidden, **kwargs)
+        self._compile_backend = selected_backend
+        return selected_backend
+
+    def disable_compile(self) -> None:
+        """Return the encoder to eager execution."""
+        self._compiled_encoder = None
+        self._compile_backend = None
+
+    def logits(self, hidden: Tensor) -> Tensor:
+        """Project embedding-space hidden states to tied token logits."""
+        return self.embeddings.project(hidden)
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        targets: Tensor | None = None,
+        *,
+        loss_chunk_size: int = 0,
+        loss_backend: str = "tiled",
+        loss_negative_samples: int = 4096,
+    ) -> tuple[Tensor | None, Tensor | None]:
+        hidden = self.encode(input_ids)
+        loss = None
+        if targets is not None:
+            if targets.shape != input_ids.shape:
+                raise ValueError("targets must have the same shape as input_ids")
+            if loss_chunk_size > 0:
+                loss = self.embeddings.cross_entropy(
+                    hidden,
+                    targets,
+                    chunk_size=loss_chunk_size,
+                    backend=loss_backend,
+                    num_negative_samples=loss_negative_samples,
+                )
+                return None, loss
+
+        logits = self.embeddings.project(hidden)
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+                ignore_index=-1,
+            )
+        return logits, loss
+
+    def num_parameters(self, trainable_only: bool = False) -> int:
+        """Count model parameters, including learned width projections."""
         parameters = sum(
             parameter.numel()
             for parameter in self.parameters()

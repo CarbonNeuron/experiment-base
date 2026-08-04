@@ -14,8 +14,13 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from config import RuntimeConfig, TrainingConfig, TransformerConfig
-from model import GenericTransformer
+from config import (
+    GrowingWidthConfig,
+    RuntimeConfig,
+    TrainingConfig,
+    TransformerConfig,
+)
+from model import GenericTransformer, GrowingWidthTransformer
 
 
 PROGRESS_REFRESH_SECONDS = 0.2
@@ -62,10 +67,10 @@ class Trainer:
 
     def __init__(
         self,
-        model: GenericTransformer,
+        model: GenericTransformer | GrowingWidthTransformer,
         train_loader: DataLoader[Tensor],
         val_loader: DataLoader[Tensor],
-        model_config: TransformerConfig,
+        model_config: TransformerConfig | GrowingWidthConfig,
         training_config: TrainingConfig,
         runtime_config: RuntimeConfig,
         device: torch.device,

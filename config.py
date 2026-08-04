@@ -39,6 +39,86 @@ class TransformerConfig:
         return asdict(self)
 
 
+def growing_width_schedule(
+    d_embed: int,
+    d_model: int,
+    n_layers: int,
+    n_heads: int,
+) -> list[int]:
+    """Return linearly spaced layer widths rounded to whole attention heads."""
+    if n_layers == 1:
+        if d_embed != d_model:
+            raise ValueError(
+                "d_embed must equal d_model when n_layers is 1"
+            )
+        return [d_embed]
+
+    width_delta = d_model - d_embed
+    denominator = (n_layers - 1) * n_heads
+    widths = []
+    for layer_index in range(n_layers):
+        # Round the rational width/head count without floating-point error.
+        numerator = (
+            d_embed * (n_layers - 1) + layer_index * width_delta
+        )
+        head_count = (2 * numerator + denominator) // (2 * denominator)
+        widths.append(head_count * n_heads)
+    widths[0] = d_embed
+    widths[-1] = d_model
+    return widths
+
+
+@dataclass
+class GrowingWidthConfig:
+    """Architecture settings for a decoder whose width grows by layer."""
+
+    d_embed: int = 128
+    d_model: int = 1024
+    n_heads: int = 16
+    n_layers: int = 12
+    d_ff_ratio: float = 4.0
+    max_seq_len: int = 512
+    dropout: float = 0.1
+    layer_norm_eps: float = 1e-5
+
+    def __post_init__(self) -> None:
+        if min(
+            self.d_embed,
+            self.d_model,
+            self.n_heads,
+            self.n_layers,
+            self.max_seq_len,
+        ) <= 0:
+            raise ValueError("model dimensions and layer counts must be positive")
+        if self.d_model < self.d_embed:
+            raise ValueError("d_model must be greater than or equal to d_embed")
+        if self.d_ff_ratio <= 0:
+            raise ValueError("d_ff_ratio must be positive")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        widths = growing_width_schedule(
+            self.d_embed,
+            self.d_model,
+            self.n_layers,
+            self.n_heads,
+        )
+        if any(width % self.n_heads for width in widths):
+            raise ValueError("each layer width must be divisible by n_heads")
+
+    @property
+    def layer_widths(self) -> list[int]:
+        """Widths used by successive transformer blocks."""
+        return growing_width_schedule(
+            self.d_embed,
+            self.d_model,
+            self.n_layers,
+            self.n_heads,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class DataConfig:
     """Dataset and DataLoader settings."""
