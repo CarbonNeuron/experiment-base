@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from tqdm.auto import tqdm
 
 from config import RuntimeConfig, TrainingConfig, TransformerConfig
 from model import GenericTransformer
+
+
+PROGRESS_REFRESH_SECONDS = 0.2
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -196,6 +200,7 @@ class Trainer:
         self.model.train()
         stop = False
         last_epoch = self.start_epoch
+        last_metrics_at = 0.0
 
         with tqdm(
             total=self.total_steps,
@@ -203,6 +208,7 @@ class Trainer:
             desc="Training",
             unit="step",
             dynamic_ncols=True,
+            mininterval=PROGRESS_REFRESH_SECONDS,
         ) as progress:
             for epoch in range(self.start_epoch, self.config.epochs):
                 last_epoch = epoch
@@ -244,12 +250,19 @@ class Trainer:
                     self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.step += 1
+                    now = time.monotonic()
+                    if (
+                        now - last_metrics_at >= PROGRESS_REFRESH_SECONDS
+                        or self.step >= self.total_steps
+                    ):
+                        progress.set_postfix(
+                            epoch=f"{epoch + 1}/{self.config.epochs}",
+                            loss=f"{loss.item():.4f}",
+                            lr=f"{self.scheduler.get_last_lr()[0]:.2e}",
+                            refresh=False,
+                        )
+                        last_metrics_at = now
                     progress.update(1)
-                    progress.set_postfix(
-                        epoch=f"{epoch + 1}/{self.config.epochs}",
-                        loss=f"{loss.item():.4f}",
-                        lr=f"{self.scheduler.get_last_lr()[0]:.2e}",
-                    )
 
                     if (
                         self.config.eval_every > 0
