@@ -240,6 +240,8 @@ class GenericTransformer(nn.Module):
         targets: Tensor | None = None,
         *,
         loss_chunk_size: int = 0,
+        loss_backend: str = "tiled",
+        loss_negative_samples: int = 4096,
     ) -> tuple[Tensor | None, Tensor | None]:
         hidden = self.encode(input_ids)
         loss = None
@@ -251,6 +253,8 @@ class GenericTransformer(nn.Module):
                     hidden,
                     targets,
                     chunk_size=loss_chunk_size,
+                    backend=loss_backend,
+                    num_negative_samples=loss_negative_samples,
                 )
                 return None, loss
 

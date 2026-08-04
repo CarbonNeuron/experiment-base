@@ -24,7 +24,12 @@ CONFIG = ExperimentConfig(
         max_seq_len=512,
     ),
     data=DataConfig(batch_size=8, num_workers=2),
-    training=TrainingConfig(epochs=3, grad_accum_steps=1),
+    training=TrainingConfig(
+        epochs=3,
+        grad_accum_steps=1,
+        ce_backend="sampled",
+        ce_negative_samples=4096,
+    ),
     runtime=RuntimeConfig(
         compile=True,
         compile_mode="default",

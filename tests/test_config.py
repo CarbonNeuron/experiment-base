@@ -12,6 +12,7 @@ class ExperimentConfigTests(unittest.TestCase):
         self.assertEqual(config.model.d_model, 128)
         self.assertEqual(config.data.batch_size, 8)
         self.assertEqual(config.training.ce_chunk_size, 1024)
+        self.assertEqual(config.training.ce_backend, "tiled")
         self.assertEqual(config.runtime.compile_backend, "auto")
 
     def test_size_scripts_select_matching_artifacts_and_directories(self) -> None:
@@ -24,6 +25,8 @@ class ExperimentConfigTests(unittest.TestCase):
             [item.runtime.checkpoint_dir.name for item in configs],
             ["128d", "256d", "512d"],
         )
+        self.assertEqual(CONFIG_128D.training.ce_backend, "sampled")
+        self.assertEqual(CONFIG_128D.training.ce_negative_samples, 4096)
 
 
 if __name__ == "__main__":

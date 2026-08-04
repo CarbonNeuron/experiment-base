@@ -48,14 +48,20 @@ instead provide a compatible local table with `--embed-path`.
 
 The training script downloads and caches WikiText-103, uses bf16 autocast on
 GPU by default, displays training and validation progress with `tqdm`, and
-writes checkpoints under `checkpoints/`. Exact tied-output cross-entropy uses
-the `svd-embeds` tiled autograd path, avoiding a retained or materialized
-`[batch, sequence, 100277]` logits tensor. `--ce-chunk-size` bounds the token
-side of each tile; use `0` for the conventional full-logit loss. The embedding
-package independently bounds vocabulary tiles and recomputes them in backward.
+writes checkpoints under `checkpoints/`. By default, exact tied-output
+cross-entropy uses the `svd-embeds` tiled autograd path, avoiding a retained or
+materialized `[batch, sequence, 100277]` logits tensor. `--ce-chunk-size`
+bounds the token side of each tile; use `0` for conventional full logits.
+
+For faster small-model experiments, select `--ce-backend sampled` and control
+the shared uniform sample with `--ce-negative-samples` (default 4096). This
+keeps the complete tokenizer and vocabulary but scores only each true target
+and the sampled negatives, with importance correction. Validation always uses
+the exact tiled 100k-way loss. The ready-made `scripts/train_128d.py` preset
+enables sampled training and encoder compilation by default.
 
 `--compile` applies `torch.compile` to the token/position/transformer encoder
-while leaving the tiled vocabulary-loss loop eager. This keeps compile
+while leaving the vocabulary-loss loop eager. This keeps compile
 graphs focused and preserves the loss's bounded-memory behavior. Select a mode
 with `--compile-mode` and a backend with `--compile-backend`. The default
 `auto` backend uses Inductor when supported, but selects `aot_eager` on CUDA

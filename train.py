@@ -9,6 +9,7 @@ from config import (
     COMPILE_BACKENDS,
     COMPILE_MODES,
     DTYPES,
+    LOSS_BACKENDS,
     DataConfig,
     ExperimentConfig,
     RuntimeConfig,
@@ -53,6 +54,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1024,
         help="Flattened token positions per tied-output loss chunk (0=full logits)",
+    )
+    training.add_argument(
+        "--ce-backend",
+        choices=LOSS_BACKENDS,
+        default="tiled",
+        help="Training loss backend; validation always uses exact tiled loss",
+    )
+    training.add_argument(
+        "--ce-negative-samples",
+        type=int,
+        default=4096,
+        help="Shared negatives per batch when --ce-backend=sampled",
     )
     training.add_argument("--max-steps", type=int, default=0)
     training.add_argument("--eval-every", type=int, default=500)
@@ -107,6 +120,8 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             grad_accum_steps=args.grad_accum_steps,
             max_grad_norm=args.max_grad_norm,
             ce_chunk_size=args.ce_chunk_size,
+            ce_backend=args.ce_backend,
+            ce_negative_samples=args.ce_negative_samples,
             max_steps=args.max_steps,
             eval_every=args.eval_every,
             eval_batches=args.eval_batches,

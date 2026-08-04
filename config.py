@@ -10,6 +10,7 @@ from typing import Any
 COMPILE_BACKENDS = ("auto", "inductor", "aot_eager", "eager")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
 DTYPES = ("fp32", "bf16", "fp16")
+LOSS_BACKENDS = ("tiled", "sampled", "checkpoint", "full")
 
 
 @dataclass
@@ -65,6 +66,8 @@ class TrainingConfig:
     grad_accum_steps: int = 1
     max_grad_norm: float = 1.0
     ce_chunk_size: int = 1024
+    ce_backend: str = "tiled"
+    ce_negative_samples: int = 4096
     max_steps: int = 0
     eval_every: int = 500
     eval_batches: int = 50
@@ -78,6 +81,10 @@ class TrainingConfig:
             raise ValueError("lr and max_grad_norm must be positive")
         if self.weight_decay < 0:
             raise ValueError("weight_decay must be non-negative")
+        if self.ce_backend not in LOSS_BACKENDS:
+            raise ValueError(f"ce_backend must be one of {LOSS_BACKENDS}")
+        if self.ce_negative_samples <= 0:
+            raise ValueError("ce_negative_samples must be positive")
         for name in (
             "warmup_steps",
             "ce_chunk_size",

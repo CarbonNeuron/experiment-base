@@ -74,6 +74,25 @@ class GenericTransformerTests(unittest.TestCase):
             self.assertIsNotNone(model.embeddings.norms.grad)
             self.assertIsNotNone(model.embeddings.rotation.weight.grad)
 
+    def test_sampled_loss_uses_the_same_full_vocabulary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model, _ = make_model(Path(directory))
+            input_ids = torch.randint(0, model.vocab_size, (2, 8))
+            targets = torch.randint(0, model.vocab_size, (2, 8))
+            logits, loss = model(
+                input_ids,
+                targets,
+                loss_chunk_size=3,
+                loss_backend="sampled",
+                loss_negative_samples=31,
+            )
+            self.assertIsNone(logits)
+            assert loss is not None
+            self.assertTrue(torch.isfinite(loss))
+            loss.backward()
+            self.assertEqual(model.vocab_size, 100_277)
+            self.assertIsNotNone(model.embeddings.norms.grad)
+
     def test_vocab_and_compiled_encoder_come_from_embedding_module(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model, _ = make_model(Path(directory))

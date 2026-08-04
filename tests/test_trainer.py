@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 from torch.utils.data import DataLoader
@@ -37,6 +38,8 @@ class TrainerTests(unittest.TestCase):
                 warmup_steps=0,
                 grad_accum_steps=3,
                 ce_chunk_size=2,
+                ce_backend="sampled",
+                ce_negative_samples=31,
                 max_steps=1,
                 eval_every=0,
                 save_every=0,
@@ -54,6 +57,21 @@ class TrainerTests(unittest.TestCase):
                 training,
                 runtime,
                 torch.device("cpu"),
+            )
+
+            with patch.object(
+                model.embeddings,
+                "cross_entropy",
+                wraps=model.embeddings.cross_entropy,
+            ) as loss_method:
+                validation_loss = trainer.evaluate()
+            self.assertTrue(torch.isfinite(torch.tensor(validation_loss)))
+            self.assertTrue(loss_method.call_args_list)
+            self.assertTrue(
+                all(
+                    call.kwargs["backend"] == "tiled"
+                    for call in loss_method.call_args_list
+                )
             )
 
             checkpoint_path = trainer.fit()

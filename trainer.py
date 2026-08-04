@@ -163,6 +163,7 @@ class Trainer:
                     chunk[:, :-1],
                     chunk[:, 1:],
                     loss_chunk_size=self.config.ce_chunk_size,
+                    loss_backend="tiled",
                 )
             assert loss is not None
             total_loss += loss.float().item()
@@ -220,6 +221,10 @@ class Trainer:
                             chunk[:, :-1],
                             chunk[:, 1:],
                             loss_chunk_size=self.config.ce_chunk_size,
+                            loss_backend=self.config.ce_backend,
+                            loss_negative_samples=(
+                                self.config.ce_negative_samples
+                            ),
                         )
                         assert loss is not None
                         scaled_loss = loss / micro_batches
