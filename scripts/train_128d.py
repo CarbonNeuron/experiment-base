@@ -25,7 +25,12 @@ CONFIG = ExperimentConfig(
     ),
     data=DataConfig(batch_size=8, num_workers=2),
     training=TrainingConfig(epochs=3, grad_accum_steps=1),
-    runtime=RuntimeConfig(checkpoint_dir=Path("checkpoints/128d")),
+    runtime=RuntimeConfig(
+        compile=True,
+        compile_mode="default",
+        compile_backend="auto",
+        checkpoint_dir=Path("checkpoints/128d"),
+    ),
 )
 
 
