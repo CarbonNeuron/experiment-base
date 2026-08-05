@@ -42,6 +42,32 @@ class TransformerConfig:
 
 
 @dataclass
+class CompoundQConfig:
+    """Transformer architecture using compound query projections."""
+
+    d_model: int = 128
+    n_heads: int = 8
+    n_layers: int = 6
+    d_ff: int = 512
+    max_seq_len: int = 512
+    dropout: float = 0.1
+    layer_norm_eps: float = 1e-5
+
+    def __post_init__(self) -> None:
+        if self.d_model <= 0 or self.n_heads <= 0 or self.n_layers <= 0:
+            raise ValueError("model dimensions and layer counts must be positive")
+        if self.d_model % self.n_heads:
+            raise ValueError("d_model must be divisible by n_heads")
+        if self.d_ff <= 0 or self.max_seq_len <= 0:
+            raise ValueError("d_ff and max_seq_len must be positive")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class GrowingWidthConfig:
     """Architecture settings for a growing-then-frozen residual stream."""
 
@@ -75,6 +101,173 @@ class GrowingWidthConfig:
     def embed_cutoff_layer(self) -> int:
         """First layer that may reconstruct the decayed embed channels."""
         return round(self.embed_cutoff_ratio * self.n_layers)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class HydraConfig:
+    """Three-phase shared, streamed, and wide-merge decoder settings."""
+
+    d_embed: int = 128
+    n_streams: int = 8
+    n_heads_per_stream: int = 8
+    n_intake_layers: int = 2
+    n_stream_layers: int = 3
+    n_merge_layers: int = 2
+    d_ff_ratio: float = 4.0
+    max_seq_len: int = 512
+    dropout: float = 0.1
+    layer_norm_eps: float = 1e-5
+
+    def __post_init__(self) -> None:
+        if min(
+            self.d_embed,
+            self.n_streams,
+            self.n_heads_per_stream,
+            self.n_intake_layers,
+            self.n_stream_layers,
+            self.n_merge_layers,
+            self.d_ff_ratio,
+            self.max_seq_len,
+            self.layer_norm_eps,
+        ) <= 0:
+            raise ValueError("model dimensions and layer counts must be positive")
+        if self.d_embed % self.n_heads_per_stream:
+            raise ValueError("d_embed must be divisible by n_heads_per_stream")
+        if self.d_wide % self.n_heads_wide:
+            raise ValueError("d_wide must be divisible by n_heads_wide")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+
+    @property
+    def d_wide(self) -> int:
+        return self.d_embed * self.n_streams
+
+    @property
+    def n_heads_wide(self) -> int:
+        return self.n_streams
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ChainedHydraConfig:
+    """Settings for chained, recursively nested Hydra blocks."""
+
+    d_embed: int = 128
+    n_heads: int = 8
+    n_intake_layers: int = 2
+    n_blocks: int = 3
+    n_streams: int = 2
+    depth: int = 2
+    n_stream_layers: int = 2
+    n_merge_layers: int = 1
+    d_ff_ratio: float = 4.0
+    max_seq_len: int = 512
+    dropout: float = 0.1
+    layer_norm_eps: float = 1e-5
+
+    def __post_init__(self) -> None:
+        if min(
+            self.d_embed,
+            self.n_heads,
+            self.n_intake_layers,
+            self.n_blocks,
+            self.n_streams,
+            self.depth,
+            self.n_stream_layers,
+            self.n_merge_layers,
+            self.d_ff_ratio,
+            self.max_seq_len,
+            self.layer_norm_eps,
+        ) <= 0:
+            raise ValueError("model dimensions and layer counts must be positive")
+        if self.d_embed % self.n_heads:
+            raise ValueError("d_embed must be divisible by n_heads")
+        if self.d_wide % self.n_heads_merge:
+            raise ValueError("d_wide must be divisible by n_heads_merge")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+
+    @property
+    def d_wide(self) -> int:
+        return self.d_embed * self.n_streams
+
+    @property
+    def n_heads_merge(self) -> int:
+        return self.n_streams
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class TournamentHydraConfig:
+    """Settings for chained flat-expert tournament Hydra blocks."""
+
+    d_embed: int = 128
+    n_heads: int = 8
+    n_intake_layers: int = 2
+    n_blocks: int = 3
+    n_experts: int = 8
+    merge_schedule: tuple[int, ...] = (4, 2)
+    n_expert_layers: int = 2
+    n_merge_layers: int = 1
+    merge_mode: str = "full"
+    d_ff_ratio: float = 4.0
+    max_seq_len: int = 512
+    dropout: float = 0.1
+    layer_norm_eps: float = 1e-5
+
+    def __post_init__(self) -> None:
+        if self.merge_mode not in ("full", "ffn", "compress"):
+            raise ValueError(
+                "merge_mode must be 'full', 'ffn', or 'compress'"
+            )
+        if min(
+            self.d_embed,
+            self.n_heads,
+            self.n_intake_layers,
+            self.n_blocks,
+            self.n_experts,
+            self.n_expert_layers,
+            self.n_merge_layers,
+            self.max_seq_len,
+        ) <= 0:
+            raise ValueError("model dimensions and layer counts must be positive")
+        if self.d_embed % self.n_heads:
+            raise ValueError("d_embed must be divisible by n_heads")
+        if not isinstance(self.merge_schedule, tuple) or not self.merge_schedule:
+            raise ValueError("merge_schedule must be a non-empty tuple")
+        if any(
+            not isinstance(group_size, int) or group_size <= 0
+            for group_size in self.merge_schedule
+        ):
+            raise ValueError("merge_schedule entries must be positive integers")
+
+        schedule_product = 1
+        for group_size in self.merge_schedule:
+            schedule_product *= group_size
+            if (group_size * self.d_embed) % group_size:
+                raise ValueError(
+                    "merge width must be divisible by its attention heads"
+                )
+        if schedule_product != self.n_experts:
+            raise ValueError(
+                "product of merge_schedule entries must equal n_experts"
+            )
+        if self.d_ff_ratio <= 0:
+            raise ValueError("d_ff_ratio must be positive")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+
+    @property
+    def n_rounds(self) -> int:
+        """Number of scheduled tournament reduction rounds."""
+        return len(self.merge_schedule)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -271,7 +464,9 @@ class RuntimeConfig:
 class ExperimentConfig:
     """Complete experiment assembled from independently editable sections."""
 
-    model: TransformerConfig = field(default_factory=TransformerConfig)
+    model: TransformerConfig | CompoundQConfig = field(
+        default_factory=TransformerConfig
+    )
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
