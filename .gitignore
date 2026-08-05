@@ -8,3 +8,4 @@ data_cache/
 wandb/
 *.log
 .idea/
+defaults.py

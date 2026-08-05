@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, ".")
 
 from config import GrowingWidthConfig
-from model import GrowingWidthTransformer
+from models import GrowingWidthTransformer
 
 DEVICE = "cuda:0"
 DTYPE = torch.bfloat16

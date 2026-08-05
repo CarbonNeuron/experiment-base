@@ -27,7 +27,7 @@ from config import (  # noqa: E402
     HardNegativeRetrievalConfig,
     TransformerConfig,
 )
-from model import GenericTransformer  # noqa: E402
+from models import GenericTransformer  # noqa: E402
 from output_retrieval import (  # noqa: E402
     ExactStaticOutputIndex,
     HardNegativeTrainer,

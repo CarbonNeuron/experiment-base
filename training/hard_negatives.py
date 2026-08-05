@@ -12,6 +12,8 @@ from torch import nn
 from config import RuntimeConfig, TrainingConfig
 from output_retrieval import HardNegativeTrainer, build_or_load_index
 
+from .logger import PrettyLogger
+
 
 class HardNegativeRuntime:
     """Keep retrieval-specific state out of the generic optimizer loop."""
@@ -22,11 +24,13 @@ class HardNegativeRuntime:
         training: TrainingConfig,
         runtime: RuntimeConfig,
         resume_fingerprint: str | None = None,
+        logger: PrettyLogger | None = None,
     ) -> None:
         self.model = model
         self.training = training
         self.runtime = runtime
         self.resume_fingerprint = resume_fingerprint
+        self.logger = logger if logger is not None else PrettyLogger()
         self.trainer: HardNegativeTrainer | None = None
         self.index_fingerprint: str | None = None
         self.index_path: Path | None = None
@@ -75,9 +79,11 @@ class HardNegativeRuntime:
         self.index_fingerprint = fingerprint
         self.index_path = path
         location = str(path) if path is not None else "memory only"
-        print(
-            f"hard-negative retrieval enabled: backend={config.backend} "
-            f"k={config.hard_k} index={location} fingerprint={fingerprint[:12]}"
+        self.logger.hard_negative_enabled(
+            config.backend,
+            config.hard_k,
+            location,
+            fingerprint,
         )
 
     def loss_weight(self, step: int) -> float:
@@ -107,9 +113,10 @@ class HardNegativeRuntime:
         ):
             recall = self.trainer.exact_recall()
             if recall is not None:
-                progress.write(
-                    f"step {step}: hard-negative exact "
-                    f"recall@{config.hard_k}={recall.item():.4f}"
+                self.logger.hard_negative_recall(
+                    step,
+                    config.hard_k,
+                    recall.item(),
                 )
         if (
             metrics is None
@@ -126,23 +133,11 @@ class HardNegativeRuntime:
         peak_memory = (
             torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
         )
-        progress.write(
-            f"step {step}: "
-            f"sampled={metrics['sampled_loss'].item():.4f} "
-            f"hard={metrics['hard_loss'].item():.4f} "
-            f"weighted_hard={metrics['weighted_hard_loss'].item():.4f} "
-            f"total={metrics['total_loss'].item():.4f} "
-            f"weight={metrics['hard_loss_weight'].item():.4f} "
-            f"positive_logit={metrics['mean_positive_logit'].item():.3f} "
-            f"max_hard_logit={metrics['mean_max_hard_logit'].item():.3f} "
-            f"margin={metrics['mean_hard_margin'].item():.3f} "
-            f"hard_error={metrics['hard_error_rate'].item():.3f} "
-            f"valid_hard={metrics['mean_valid_hard_negatives'].item():.1f} "
-            f"retrieval_ms={1000 * metrics['retrieval_seconds'].item():.2f} "
-            f"score_ms={1000 * metrics['candidate_score_seconds'].item():.2f} "
-            f"hard_loss_ms={1000 * metrics['hard_loss_seconds'].item():.2f} "
-            f"step_ms={1000 * step_seconds:.2f} "
-            f"peak_bytes={peak_memory} "
-            f"scale={self.model.embeddings.magnitude.item():.4f} "
-            f"rotation_orth_error={orthogonality_error:.2e}"
+        self.logger.hard_negative_metrics(
+            step,
+            metrics,
+            step_seconds,
+            peak_memory,
+            self.model.embeddings.magnitude.item(),
+            orthogonality_error,
         )

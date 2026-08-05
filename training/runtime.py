@@ -9,10 +9,29 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
 
+def _load_default_device() -> str | None:
+    """Read DEVICE from the repo-root ``defaults.py`` if it exists."""
+    try:
+        from defaults import DEVICE  # type: ignore[import-untyped]
+
+        return DEVICE
+    except (ImportError, AttributeError):
+        return None
+
+
 def resolve_device(requested: str) -> torch.device:
-    """Resolve ``auto`` without leaking device policy into other modules."""
+    """Resolve ``auto`` without leaking device policy into other modules.
+
+    Resolution order for ``"auto"``:
+    1. ``defaults.py`` ``DEVICE`` (site-local, gitignored)
+    2. ``"cuda"`` if available, else ``"cpu"``
+    """
     if requested == "auto":
-        requested = "cuda" if torch.cuda.is_available() else "cpu"
+        site_default = _load_default_device()
+        if site_default is not None:
+            requested = site_default
+        else:
+            requested = "cuda" if torch.cuda.is_available() else "cpu"
     return torch.device(requested)
 
 

@@ -106,8 +106,8 @@ Each module owns one concern:
 | `models/` | Baseline, Hydra, and growing-width architecture components |
 | `model.py` | Backward-compatible exports for `models/` |
 | `multigrid/` | Multigrid-memory architecture and benchmarks |
-| `training/` | Objectives, runtime policy, and hard-negative lifecycle |
-| `trainer.py` | Architecture-independent optimization loop |
+| `training/` | Trainer, objectives, runtime policy, and hard-negative lifecycle |
+| `trainer.py` | Backward-compatible exports for `training/` |
 | `experiments/` | Model registry and training-objective selection |
 | `experiment.py` | Compose any registered model, data, and the shared trainer |
 | `train.py` | Translate command-line arguments into configuration |
@@ -118,6 +118,11 @@ Experiments call `run_experiment()` directly and only define an
 `ExperimentConfig`. Models that return their own optimized loss and models that
 return logits (such as multigrid) are adapted through `training/objectives.py`,
 so presets do not implement private optimizer or checkpoint loops.
+
+To add a new architecture, bind its config type, constructor, and objective
+with the public `experiments.register_model()` API. No edits to the runner or
+trainer are required. See [experiments/README.md](experiments/README.md) for a
+complete template and the supported extension contracts.
 
 ## Model-size scripts
 

@@ -9,9 +9,9 @@ from datasets import load_dataset
 from svd_embeds import get_tokenizer
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
-from tqdm.auto import tqdm
 
 from config import DataConfig
+from training.logger import PrettyLogger
 
 
 class TokenDataset(Dataset[Tensor]):
@@ -30,8 +30,15 @@ class TokenDataset(Dataset[Tensor]):
         return self.tokens[start : start + self.seq_len + 1]
 
 
-def load_wikitext(cache_dir: Path, seq_len: int, split: str) -> TokenDataset:
+def load_wikitext(
+    cache_dir: Path,
+    seq_len: int,
+    split: str,
+    logger: PrettyLogger | None = None,
+) -> TokenDataset:
     """Load and tokenize one WikiText-103 split, reusing its disk cache."""
+    if logger is None:
+        logger = PrettyLogger()
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"wikitext103_{split}_cl100k.pt"
     if cache_path.exists():
@@ -42,13 +49,20 @@ def load_wikitext(cache_dir: Path, seq_len: int, split: str) -> TokenDataset:
         )
         tokenizer = get_tokenizer()
         token_ids: list[int] = []
-        for text in tqdm(raw["text"], desc=f"Tokenizing {split}", unit="doc"):
-            if text:
-                token_ids.extend(tokenizer.encode_ordinary(text))
-                token_ids.append(tokenizer.eot_token)
+        description = f"Tokenizing {split}"
+        with logger.tokenization_progress(
+            len(raw["text"]),
+            description,
+        ) as progress:
+            task = progress.add_task(description, total=len(raw["text"]))
+            for text in raw["text"]:
+                if text:
+                    token_ids.extend(tokenizer.encode_ordinary(text))
+                    token_ids.append(tokenizer.eot_token)
+                progress.advance(task)
         tokens = torch.tensor(token_ids, dtype=torch.long)
         torch.save(tokens, cache_path)
-    print(f"{split}: {tokens.numel():,} cached tokens")
+    logger.data_loaded(split, tokens.numel())
     return TokenDataset(tokens, seq_len)
 
 
@@ -57,10 +71,13 @@ def build_dataloaders(
     *,
     seq_len: int,
     device: torch.device,
+    logger: PrettyLogger | None = None,
 ) -> tuple[DataLoader[Tensor], DataLoader[Tensor]]:
     """Build train/validation loaders without knowing model or optimizer details."""
-    train_data = load_wikitext(config.cache_dir, seq_len, "train")
-    val_data = load_wikitext(config.cache_dir, seq_len, "validation")
+    if logger is None:
+        logger = PrettyLogger()
+    train_data = load_wikitext(config.cache_dir, seq_len, "train", logger)
+    val_data = load_wikitext(config.cache_dir, seq_len, "validation", logger)
     common_args = {
         "batch_size": config.batch_size,
         "pin_memory": device.type == "cuda",
