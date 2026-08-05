@@ -103,16 +103,21 @@ Each module owns one concern:
 |---|---|
 | `config.py` | Structured model, data, training, and runtime settings |
 | `data.py` | WikiText token cache and DataLoader construction |
-| `model.py` | Transformer architecture and encoder compilation |
-| `trainer.py` | Optimization, evaluation, progress, and checkpoints |
-| `experiment.py` | Compose configured model, data, and trainer |
+| `models/` | Baseline, Hydra, and growing-width architecture components |
+| `model.py` | Backward-compatible exports for `models/` |
+| `multigrid/` | Multigrid-memory architecture and benchmarks |
+| `training/` | Objectives, runtime policy, and hard-negative lifecycle |
+| `trainer.py` | Architecture-independent optimization loop |
+| `experiments/` | Model registry and training-objective selection |
+| `experiment.py` | Compose any registered model, data, and the shared trainer |
 | `train.py` | Translate command-line arguments into configuration |
 | `output_retrieval/` | Static exact/IVF indexes, filtering, hard loss, and index I/O |
 | `benchmarks/` | Sampled versus hybrid output-training benchmark |
 
-Experiments can call `run_experiment()` directly and do not need to imitate the
-CLI. This keeps architecture changes independent from dataset and training-loop
-changes.
+Experiments call `run_experiment()` directly and only define an
+`ExperimentConfig`. Models that return their own optimized loss and models that
+return logits (such as multigrid) are adapted through `training/objectives.py`,
+so presets do not implement private optimizer or checkpoint loops.
 
 ## Model-size scripts
 
@@ -122,6 +127,8 @@ Ready-to-edit Python presets live under `scripts/`:
 python scripts/train_128d.py
 python scripts/train_256d.py
 python scripts/train_512d.py
+python scripts/train_multigrid.py
+python scripts/train_growing_width.py
 ```
 
 They cover compact 128d, mid-sized 256d, and larger 512d transformers. Each

@@ -1,30 +1,29 @@
-"""Compatibility exports for architecture implementations in :mod:`models`."""
+"""Model implementations grouped by architecture family."""
 
-# Kept as a module attribute for callers that patch ``model.importlib`` while
-# testing compiler-backend discovery.
-import importlib
-
-from models import (
+from .base import SVDLanguageModel, resolve_compile_backend
+from .baseline import (
     CausalSelfAttention,
-    ChainedHydraTransformer,
     CompoundQAttention,
     CompoundQTransformer,
-    CompressMergeBlock,
-    FFNMergeBlock,
     FeedForward,
     GenericTransformer,
-    GrowingWidthTransformer,
+    TransformerBlock,
+)
+from .growing_width import GrowingWidthTransformer, ScratchBlock
+from .hydra import (
+    ChainedHydraTransformer,
+    HydraTransformer,
+    TournamentHydraTransformer,
+)
+from .hydra_layers import (
+    CompressMergeBlock,
+    FFNMergeBlock,
     HydraAttention,
     HydraBlock,
     HydraFeedForward,
-    HydraTransformer,
     RecursiveHydraBlock,
-    ScratchBlock,
     TournamentBlock,
-    TournamentHydraTransformer,
     TournamentRound,
-    TransformerBlock,
-    resolve_compile_backend,
 )
 
 __all__ = [
@@ -42,6 +41,7 @@ __all__ = [
     "HydraFeedForward",
     "HydraTransformer",
     "RecursiveHydraBlock",
+    "SVDLanguageModel",
     "ScratchBlock",
     "TournamentBlock",
     "TournamentHydraTransformer",

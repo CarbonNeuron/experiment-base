@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 
 COMPILE_BACKENDS = ("auto", "inductor", "aot_eager", "eager")
@@ -13,6 +13,14 @@ DTYPES = ("fp32", "bf16", "fp16")
 LOSS_BACKENDS = ("tiled", "sampled", "checkpoint", "full")
 HARD_NEGATIVE_BACKENDS = ("ivf", "exact")
 HARD_NEGATIVE_LOSSES = ("candidate_ce", "pairwise")
+
+
+class ArchitectureConfig(Protocol):
+    """Minimum config contract understood by the experiment runner."""
+
+    max_seq_len: int
+
+    def to_dict(self) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -464,9 +472,9 @@ class RuntimeConfig:
 class ExperimentConfig:
     """Complete experiment assembled from independently editable sections."""
 
-    model: TransformerConfig | CompoundQConfig = field(
-        default_factory=TransformerConfig
-    )
+    # Architecture packages own their config types. The experiment runner
+    # resolves them through its registry instead of growing this union forever.
+    model: ArchitectureConfig = field(default_factory=TransformerConfig)
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
