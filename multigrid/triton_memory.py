@@ -62,29 +62,6 @@ if _TRITON_AVAILABLE:
         inv_sqrt_key: tl.constexpr = 1.0 / (K**0.5)
 
         for position in range(T):
-            if SAVE_TRACE:
-                # Save one pre-read state per token. States before later
-                # writers are reconstructed from this snapshot and the write
-                # inputs in backward, avoiding a W+1 trace multiplier.
-                trace_value_base = ((batch * T + position) * S) * M
-                trace_key_base = ((batch * T + position) * S) * K
-                trace_priority_base = (batch * T + position) * S
-                tl.store(
-                    trace_values + trace_value_base + slot_memory,
-                    values,
-                    mask=valid_slot[:, None] & valid_memory[None, :],
-                )
-                tl.store(
-                    trace_keys + trace_key_base + slot_key,
-                    keys,
-                    mask=valid_slot[:, None] & valid_key[None, :],
-                )
-                tl.store(
-                    trace_priorities + trace_priority_base + slot,
-                    priorities,
-                    mask=valid_slot,
-                )
-
             query_base = (batch * T + position) * K
             query = tl.load(
                 queries + query_base + key_dim,
@@ -106,6 +83,36 @@ if _TRITON_AVAILABLE:
             )
 
             for writer in range(W):
+                if SAVE_TRACE:
+                    # Backward needs the state immediately before each
+                    # writer. Saving it here uses more memory than one trace
+                    # per token, but avoids replaying writers 0..writer-1 for
+                    # every reverse step (quadratic work in the layer count).
+                    trace_value_base = (
+                        ((batch * T + position) * W + writer) * S
+                    ) * M
+                    trace_key_base = (
+                        ((batch * T + position) * W + writer) * S
+                    ) * K
+                    trace_priority_base = (
+                        (batch * T + position) * W + writer
+                    ) * S
+                    tl.store(
+                        trace_values + trace_value_base + slot_memory,
+                        values,
+                        mask=valid_slot[:, None] & valid_memory[None, :],
+                    )
+                    tl.store(
+                        trace_keys + trace_key_base + slot_key,
+                        keys,
+                        mask=valid_slot[:, None] & valid_key[None, :],
+                    )
+                    tl.store(
+                        trace_priorities + trace_priority_base + slot,
+                        priorities,
+                        mask=valid_slot,
+                    )
+
                 write_value_base = ((batch * W + writer) * T + position) * M
                 write_key_base = ((batch * W + writer) * T + position) * K
                 write_priority_index = (batch * W + writer) * T + position
@@ -237,93 +244,32 @@ if _TRITON_AVAILABLE:
 
         for reverse_position in range(T):
             position: tl.constexpr = T - 1 - reverse_position
-            trace_value_base = ((batch * T + position) * S) * M
-            trace_key_base = ((batch * T + position) * S) * K
-            trace_priority_base = (batch * T + position) * S
-            read_values = tl.load(
-                trace_values + trace_value_base + slot_memory,
-                mask=valid_slot[:, None] & valid_memory[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            read_keys = tl.load(
-                trace_keys + trace_key_base + slot_key,
-                mask=valid_slot[:, None] & valid_key[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            read_priorities = tl.load(
-                trace_priorities + trace_priority_base + slot,
-                mask=valid_slot,
-                other=0.0,
-            ).to(tl.float32)
-
             for reverse_writer in range(W):
                 writer: tl.constexpr = W - 1 - reverse_writer
-                old_values = read_values
-                old_keys = read_keys
-                old_priorities = read_priorities
-
-                # Recreate the state immediately before this writer. W is at
-                # most the block count (four in the evaluator), so the small
-                # amount of recomputation is much cheaper than loading W full
-                # memory-bank snapshots from HBM.
-                for replay_writer in range(writer):
-                    replay_value_base = (
-                        (batch * W + replay_writer) * T + position
-                    ) * M
-                    replay_key_base = (
-                        (batch * W + replay_writer) * T + position
-                    ) * K
-                    replay_priority_index = (
-                        (batch * W + replay_writer) * T + position
-                    )
-                    replay_value = tl.load(
-                        write_values + replay_value_base + memory,
-                        mask=valid_memory,
-                        other=0.0,
-                    ).to(tl.float32)
-                    replay_key = tl.load(
-                        write_keys + replay_key_base + key_dim,
-                        mask=valid_key,
-                        other=0.0,
-                    ).to(tl.float32)
-                    replay_priority = tl.load(
-                        write_priorities + replay_priority_index
-                    ).to(tl.float32)
-                    replay_logits = tl.where(
-                        valid_slot,
-                        -old_priorities / TEMPERATURE,
-                        -float("inf"),
-                    )
-                    replay_logits = replay_logits - tl.max(
-                        replay_logits, axis=0
-                    )
-                    replay_slots = tl.exp(replay_logits)
-                    replay_slots = replay_slots / tl.sum(
-                        replay_slots, axis=0
-                    )
-                    replay_replacement = tl.argmax(replay_slots, axis=0)
-                    replay_hard_slots = (
-                        slot == replay_replacement
-                    ) & valid_slot
-                    replay_lowest = tl.sum(
-                        replay_slots * old_priorities, axis=0
-                    )
-                    replay_overwrite = tl.sigmoid(
-                        (replay_priority - replay_lowest) / TEMPERATURE
-                    )
-                    replay_update = replay_hard_slots * replay_overwrite
-                    old_values = (
-                        old_values * (1.0 - replay_update[:, None])
-                        + replay_value[None, :] * replay_update[:, None]
-                    )
-                    old_keys = (
-                        old_keys * (1.0 - replay_update[:, None])
-                        + replay_key[None, :] * replay_update[:, None]
-                    )
-                    old_priorities = (
-                        old_priorities * (1.0 - replay_update)
-                        + replay_priority * replay_update
-                    )
+                trace_value_base = (
+                    ((batch * T + position) * W + writer) * S
+                ) * M
+                trace_key_base = (
+                    ((batch * T + position) * W + writer) * S
+                ) * K
+                trace_priority_base = (
+                    (batch * T + position) * W + writer
+                ) * S
+                old_values = tl.load(
+                    trace_values + trace_value_base + slot_memory,
+                    mask=valid_slot[:, None] & valid_memory[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                old_keys = tl.load(
+                    trace_keys + trace_key_base + slot_key,
+                    mask=valid_slot[:, None] & valid_key[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                old_priorities = tl.load(
+                    trace_priorities + trace_priority_base + slot,
+                    mask=valid_slot,
+                    other=0.0,
+                ).to(tl.float32)
 
                 write_value_base = ((batch * W + writer) * T + position) * M
                 write_key_base = ((batch * W + writer) * T + position) * K
@@ -422,6 +368,25 @@ if _TRITON_AVAILABLE:
                 grad_keys = grad_old_keys
                 grad_priorities = grad_old_priorities
 
+            # Writer zero's pre-update state is the state used by the read.
+            read_value_base = ((batch * T + position) * W * S) * M
+            read_key_base = ((batch * T + position) * W * S) * K
+            read_priority_base = (batch * T + position) * W * S
+            read_values = tl.load(
+                trace_values + read_value_base + slot_memory,
+                mask=valid_slot[:, None] & valid_memory[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            read_keys = tl.load(
+                trace_keys + read_key_base + slot_key,
+                mask=valid_slot[:, None] & valid_key[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            read_priorities = tl.load(
+                trace_priorities + read_priority_base + slot,
+                mask=valid_slot,
+                other=0.0,
+            ).to(tl.float32)
             query_base = (batch * T + position) * K
             query = tl.load(
                 queries + query_base + key_dim,
@@ -498,17 +463,17 @@ class _SoftmaxMemoryFunction(torch.autograd.Function):
         save_trace = not hard_overwrite
         if save_trace:
             trace_values = torch.empty(
-                batch_size, seq_len, n_slots, d_memory,
+                batch_size, seq_len, n_writers, n_slots, d_memory,
                 device=queries.device,
                 dtype=write_values.dtype,
             )
             trace_keys = torch.empty(
-                batch_size, seq_len, n_slots, d_key,
+                batch_size, seq_len, n_writers, n_slots, d_key,
                 device=queries.device,
                 dtype=write_keys.dtype,
             )
             trace_priorities = torch.empty(
-                batch_size, seq_len, n_slots,
+                batch_size, seq_len, n_writers, n_slots,
                 device=queries.device,
                 dtype=write_priorities.dtype,
             )

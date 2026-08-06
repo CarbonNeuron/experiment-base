@@ -65,7 +65,7 @@ class PrimitiveEvaluationConfig:
     compile_dynamic: bool = False
     save_every: int = 1_000
     resume: bool = True
-    output_dir: Path = Path("checkpoints/multigrid-evaluation-v2")
+    output_dir: Path = Path("checkpoints/multigrid-evaluation-v3")
     runtime_lengths: tuple[int, ...] = (64, 128, 256, 512)
     runtime_repetitions: int = 5
     decode_steps: int = 8
@@ -717,8 +717,8 @@ class PrimitiveTrainer:
             "runtime": runtime_rows,
             "notes": {
                 "language_modeling": (
-                    "WikiText remains a separate secondary evaluation via "
-                    "scripts/train_multigrid.py; these results isolate "
+                    "WikiText transfer is evaluated separately via "
+                    "scripts/evaluate_multigrid_nlp.py; these results isolate "
                     "mechanism-level computation first."
                 ),
                 "decode": (

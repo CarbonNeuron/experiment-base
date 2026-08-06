@@ -25,6 +25,11 @@ from .evaluation import (
     PrimitiveTrainer,
     run_primitive_evaluation,
 )
+from .language_evaluation import (
+    LanguageEvaluationConfig,
+    LanguageEvaluator,
+    run_language_evaluation,
+)
 from .layers import (
     CausalProlongation,
     CausalRestriction,
@@ -38,6 +43,7 @@ from .layers import (
 from .model import MultigridMemoryTransformer
 from .mechanisms import (
     MECHANISM_NAMES,
+    MechanismLanguageModel,
     SymbolicModelConfig,
     SymbolicSequenceModel,
     matched_model_configs,
@@ -51,7 +57,10 @@ __all__ = [
     "CausalRestriction",
     "EpisodicMemory",
     "LocalRefinement",
+    "LanguageEvaluationConfig",
+    "LanguageEvaluator",
     "MECHANISM_NAMES",
+    "MechanismLanguageModel",
     "MemoryState",
     "MemoryWrites",
     "MultigridMemoryBlock",
@@ -77,5 +86,6 @@ __all__ = [
     "nested_scope_binding",
     "paraphrased_needle_retrieval",
     "run_primitive_evaluation",
+    "run_language_evaluation",
     "state_tracking",
 ]

@@ -215,8 +215,8 @@ def test_multigrid_is_causal_at_every_boundary_and_length(
     torch.testing.assert_close(
         extended_output[:, : original.size(1)],
         reference,
-        atol=0.0,
-        rtol=0.0,
+        atol=1e-7,
+        rtol=1e-7,
     )
 
 

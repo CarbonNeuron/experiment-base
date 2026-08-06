@@ -126,5 +126,5 @@ Score shown: **Token accuracy**. The best result in each test row is bold.
 
 ## Notes
 
-- WikiText remains a separate secondary evaluation via scripts/train_multigrid.py; these results isolate mechanism-level computation first.
+- WikiText transfer is evaluated separately via scripts/evaluate_multigrid_nlp.py; these results isolate mechanism-level computation first.
 - All mechanisms use full-prefix replay because the public model APIs do not expose inference caches.

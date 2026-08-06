@@ -25,6 +25,8 @@ from .hydra_layers import (
     TournamentBlock,
     TournamentRound,
 )
+from .quatspin import QuatRMSNorm, QuatSpinFFN, quat_mul
+from .triton_quatspin import fused_quat_mul_norm, triton_quatspin_available
 
 __all__ = [
     "CausalSelfAttention",
@@ -34,12 +36,15 @@ __all__ = [
     "CompressMergeBlock",
     "FFNMergeBlock",
     "FeedForward",
+    "fused_quat_mul_norm",
     "GenericTransformer",
     "GrowingWidthTransformer",
     "HydraAttention",
     "HydraBlock",
     "HydraFeedForward",
     "HydraTransformer",
+    "QuatRMSNorm",
+    "QuatSpinFFN",
     "RecursiveHydraBlock",
     "SVDLanguageModel",
     "ScratchBlock",
@@ -47,5 +52,7 @@ __all__ = [
     "TournamentHydraTransformer",
     "TournamentRound",
     "TransformerBlock",
+    "quat_mul",
     "resolve_compile_backend",
+    "triton_quatspin_available",
 ]

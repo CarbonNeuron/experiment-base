@@ -280,7 +280,7 @@ def _parse_args() -> argparse.Namespace:
         "report",
         type=Path,
         nargs="?",
-        default=Path("checkpoints/multigrid-evaluation-v2/report.json"),
+        default=Path("checkpoints/multigrid-evaluation-v3/report.json"),
         help="input report.json path",
     )
     parser.add_argument(

@@ -2222,7 +2222,7 @@
     }
   ],
   "notes": {
-    "language_modeling": "WikiText remains a separate secondary evaluation via scripts/train_multigrid.py; these results isolate mechanism-level computation first.",
+    "language_modeling": "WikiText transfer is evaluated separately via scripts/evaluate_multigrid_nlp.py; these results isolate mechanism-level computation first.",
     "decode": "All mechanisms use full-prefix replay because the public model APIs do not expose inference caches."
   }
 }

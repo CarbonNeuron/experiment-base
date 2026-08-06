@@ -21,6 +21,44 @@ position embeddings, transformer blocks, and final layer norm are trainable.
 Vocabulary size and tokenizer come directly from `svd-embeds`; they are not
 duplicated in the transformer configuration.
 
+### QuatSpin FFN
+
+The baseline, Compound-Q, and Multigrid-memory transformers can replace their
+GELU FFN with the activation-free
+[QuatSpin](https://github.com/CarbonNeuron/quatspin) FFN. The implementation
+projects each token into activation and multiplier quaternions, applies their
+Hamilton product, normalizes quaternion magnitude, and projects back to the
+residual width.
+
+Select it from the generic training CLI:
+
+```bash
+python train.py --ffn-type quatspin --n-quats 85
+python scripts/train_multigrid.py --ffn-type quatspin --n-quats 85
+```
+
+Or in a Python experiment preset:
+
+```python
+TransformerConfig(
+    d_model=128,
+    d_ff=512,
+    ffn_type="quatspin",
+    n_quats=85,
+)
+```
+
+`n_quats` defaults to `d_model`, matching upstream QuatFormer. Set it
+explicitly to control FFN capacity; approximately `d_ff / 6` quaternions
+matches the parameter count of this repository's two-linear GELU FFN. Custom
+architectures can import `QuatSpinFFN` directly from `models` or `model`.
+
+On CUDA or ROCm systems with Triton installed, QuatSpin automatically uses a
+fused forward/backward operator for the Hamilton product, quaternion magnitude
+normalization, and channel scaling. Unsupported devices and dtypes use the
+equivalent PyTorch path; a runtime kernel failure warns once and then falls
+back for the lifetime of that FFN module.
+
 ## Setup
 
 Clone the repository and create an environment:

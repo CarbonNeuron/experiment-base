@@ -10,6 +10,7 @@ from typing import Any, Protocol
 COMPILE_BACKENDS = ("auto", "inductor", "aot_eager", "eager")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
 DTYPES = ("fp32", "bf16", "fp16")
+FFN_TYPES = ("gelu", "quatspin")
 LOSS_BACKENDS = ("tiled", "sampled", "checkpoint", "full")
 HARD_NEGATIVE_BACKENDS = ("ivf", "exact")
 HARD_NEGATIVE_LOSSES = ("candidate_ce", "pairwise")
@@ -34,6 +35,8 @@ class TransformerConfig:
     max_seq_len: int = 512
     dropout: float = 0.1
     layer_norm_eps: float = 1e-5
+    ffn_type: str = "gelu"
+    n_quats: int | None = None
 
     def __post_init__(self) -> None:
         if self.d_model <= 0 or self.n_heads <= 0 or self.n_layers <= 0:
@@ -44,6 +47,10 @@ class TransformerConfig:
             raise ValueError("d_ff and max_seq_len must be positive")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
+        if self.ffn_type not in FFN_TYPES:
+            raise ValueError(f"ffn_type must be one of {FFN_TYPES}")
+        if self.n_quats is not None and self.n_quats <= 0:
+            raise ValueError("n_quats must be positive when set")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,6 +67,8 @@ class CompoundQConfig:
     max_seq_len: int = 512
     dropout: float = 0.1
     layer_norm_eps: float = 1e-5
+    ffn_type: str = "gelu"
+    n_quats: int | None = None
 
     def __post_init__(self) -> None:
         if self.d_model <= 0 or self.n_heads <= 0 or self.n_layers <= 0:
@@ -70,6 +79,10 @@ class CompoundQConfig:
             raise ValueError("d_ff and max_seq_len must be positive")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
+        if self.ffn_type not in FFN_TYPES:
+            raise ValueError(f"ffn_type must be one of {FFN_TYPES}")
+        if self.n_quats is not None and self.n_quats <= 0:
+            raise ValueError("n_quats must be positive when set")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

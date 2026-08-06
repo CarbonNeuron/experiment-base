@@ -14,6 +14,7 @@ python scripts/train_tournament_hydra.py
 python scripts/train_growing_width.py
 python scripts/train_multigrid.py
 python scripts/evaluate_multigrid.py
+python scripts/evaluate_multigrid_nlp.py
 ```
 
 Each file owns one model preset and writes to a separate checkpoint directory.
@@ -33,6 +34,11 @@ preset.
 multigrid mechanism and four matched-parameter baselines separately on seven
 diagnostic sequence tasks, then writes capacity and runtime curves. See
 [`multigrid/README.md`](../multigrid/README.md) for its protocol and outputs.
+
+`evaluate_multigrid_nlp.py` is the transfer test for those same matched
+mechanisms. It trains on identical WikiText-103 token windows and compares
+exact perplexity from 128 through 2,048 tokens, with resumable per-mechanism
+checkpoints and token-matched learning curves.
 
 These entry points intentionally contain configuration only. New presets for a
 registered architecture should follow the same pattern and call

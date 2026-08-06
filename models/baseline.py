@@ -11,6 +11,7 @@ from torch.nn import functional as F
 
 from config import CompoundQConfig, TransformerConfig
 from .base import SVDLanguageModel
+from .quatspin import QuatSpinFFN
 
 
 class CausalSelfAttention(nn.Module):
@@ -58,13 +59,25 @@ class FeedForward(nn.Module):
         return self.dropout(self.down(F.gelu(self.up(x))))
 
 
+def _make_feed_forward(
+    config: TransformerConfig | CompoundQConfig,
+) -> nn.Module:
+    if config.ffn_type == "quatspin":
+        return QuatSpinFFN(
+            config.d_model,
+            n_quats=config.n_quats,
+            dropout=config.dropout,
+        )
+    return FeedForward(config)
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
         self.attn_norm = nn.LayerNorm(config.d_model, eps=config.layer_norm_eps)
         self.attn = CausalSelfAttention(config)
         self.ffn_norm = nn.LayerNorm(config.d_model, eps=config.layer_norm_eps)
-        self.ffn = FeedForward(config)
+        self.ffn = _make_feed_forward(config)
 
     def forward(self, x: Tensor) -> Tensor:
         x = x + self.attn(self.attn_norm(x))
@@ -126,7 +139,7 @@ class CompoundQBlock(nn.Module):
         self.attn_norm = nn.LayerNorm(config.d_model, eps=config.layer_norm_eps)
         self.attn = CompoundQAttention(config)
         self.ffn_norm = nn.LayerNorm(config.d_model, eps=config.layer_norm_eps)
-        self.ffn = FeedForward(config)
+        self.ffn = _make_feed_forward(config)
 
     def forward(self, x: Tensor) -> Tensor:
         x = x + self.attn(self.attn_norm(x))

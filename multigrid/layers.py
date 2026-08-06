@@ -10,8 +10,15 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from models.quatspin import QuatSpinFFN
+
 from .config import MultigridMemoryConfig
 from .triton_memory import fused_softmax_memory, triton_memory_available
+
+try:
+    from .triton_factorized_memory import factorized_softmax_memory
+except ImportError:  # pragma: no cover - optional accelerator dependency
+    factorized_softmax_memory = None  # type: ignore[assignment]
 
 
 def _next_power_of_two(length: int) -> int:
@@ -100,35 +107,35 @@ class LocalRefinement(nn.Module):
 
 
 class _VCyclePass(nn.Module):
-    def __init__(self, config: MultigridMemoryConfig, max_levels: int) -> None:
+    """Scale-shared operators for one down-and-up multigrid pass.
+
+    The same learned operators are applied at every pyramid level. Besides
+    making the computation scale-equivariant, this ensures that training at a
+    shorter context updates every parameter later used for extrapolation.
+    """
+
+    def __init__(self, config: MultigridMemoryConfig) -> None:
         super().__init__()
-        self.refinements = nn.ModuleList(
-            LocalRefinement(
-                config.d_model,
-                config.refinement_kernel_size,
-                config.dropout,
-            )
-            for _ in range(max_levels + 1)
+        self.refinement = LocalRefinement(
+            config.d_model,
+            config.refinement_kernel_size,
+            config.dropout,
         )
-        self.restrictions = nn.ModuleList(
-            CausalRestriction(config.d_model) for _ in range(max_levels)
-        )
-        self.prolongations = nn.ModuleList(
-            CausalProlongation(config.d_model) for _ in range(max_levels)
-        )
+        self.restriction = CausalRestriction(config.d_model)
+        self.prolongation = CausalProlongation(config.d_model)
 
     def forward(self, x: Tensor, n_levels: int) -> Tensor:
         pyramid: list[Tensor] = []
         current = x
         for level in range(n_levels + 1):
-            current = current + self.refinements[level](current)
+            current = current + self.refinement(current)
             pyramid.append(current)
             if level < n_levels:
-                current = self.restrictions[level](current)
+                current = self.restriction(current)
 
         correction = pyramid[-1]
         for level in range(n_levels - 1, -1, -1):
-            lifted = self.prolongations[level](
+            lifted = self.prolongation(
                 correction, target_length=pyramid[level].size(1)
             )
             correction = pyramid[level] + lifted
@@ -144,7 +151,7 @@ class VCycle(nn.Module):
         self.max_padded_len = _next_power_of_two(config.max_seq_len)
         self.max_levels = int(math.log2(self.max_padded_len))
         self.cycles = nn.ModuleList(
-            _VCyclePass(config, self.max_levels)
+            _VCyclePass(config)
             for _ in range(config.n_cycles)
         )
 
@@ -429,6 +436,7 @@ class EpisodicMemory(nn.Module):
             self.use_triton_memory
             and not self._triton_failed
             and triton_memory_available()
+            and factorized_softmax_memory is not None
             and x.is_cuda
             and self.addressing_mode == "softmax"
             and replay_history
@@ -452,20 +460,35 @@ class EpisodicMemory(nn.Module):
                 all_write_priorities = torch.stack(
                     [writes.priorities for writes in writers], dim=1
                 )
-                (
-                    compressed_reads,
-                    final_values,
-                    final_keys,
-                    final_priorities,
-                ) = fused_softmax_memory(
-                    read_queries,
-                    all_write_values,
-                    all_write_keys,
-                    all_write_priorities,
-                    self.n_slots,
-                    self.temperature,
-                    hard_overwrite=not self.training,
-                )
+                if self.training:
+                    (
+                        compressed_reads,
+                        final_values,
+                        final_keys,
+                        final_priorities,
+                    ) = factorized_softmax_memory(
+                        read_queries,
+                        all_write_values,
+                        all_write_keys,
+                        all_write_priorities,
+                        self.n_slots,
+                        self.temperature,
+                    )
+                else:
+                    (
+                        compressed_reads,
+                        final_values,
+                        final_keys,
+                        final_priorities,
+                    ) = fused_softmax_memory(
+                        read_queries,
+                        all_write_values,
+                        all_write_keys,
+                        all_write_priorities,
+                        self.n_slots,
+                        self.temperature,
+                        hard_overwrite=True,
+                    )
                 working_state = MemoryState(
                     final_values,
                     final_keys,
@@ -529,20 +552,31 @@ class MultigridMemoryBlock(nn.Module):
         )
         self.memory = EpisodicMemory(config)
         self.ffn_norm = nn.LayerNorm(config.d_model, eps=config.layer_norm_eps)
-        self.ffn = nn.Sequential(
-            nn.Linear(config.d_model, config.d_ff),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.d_ff, config.d_model),
-            nn.Dropout(config.dropout),
-        )
+        if config.ffn_type == "quatspin":
+            self.ffn = QuatSpinFFN(
+                config.d_model,
+                n_quats=config.n_quats,
+                dropout=config.dropout,
+            )
+        else:
+            self.ffn = nn.Sequential(
+                nn.Linear(config.d_model, config.d_ff),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.d_ff, config.d_model),
+                nn.Dropout(config.dropout),
+            )
 
     def forward(
         self, x: Tensor, state: MemoryState | None = None
     ) -> tuple[Tensor, MemoryState]:
         multigrid_input = self.multigrid_norm(x)
         prediction = self.multigrid(multigrid_input)
-        x = x + prediction
+        # VCycle returns a full multiscale prediction whose leading identity
+        # path is ``multigrid_input``. Add only its learned correction to the
+        # residual stream; adding the full prediction would inject another
+        # unit-RMS copy at every block and drown later learned updates.
+        x = x + (prediction - multigrid_input)
         memory_query = self.memory_norm(x)
         correction, state = self.memory(
             multigrid_input,

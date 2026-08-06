@@ -460,6 +460,121 @@ class PrettyLogger:
             )
         )
 
+    def language_evaluation_header(
+        self,
+        *,
+        device: Any,
+        dtype: str,
+        output_dir: Any,
+        train_steps: int,
+        train_sequence_length: int,
+        eval_sequence_lengths: tuple[int, ...],
+        eval_tail_tokens: int,
+        batch_size: int,
+        eval_batch_size: int,
+        eval_batches: int,
+        mechanisms: tuple[str, ...],
+    ) -> None:
+        """Describe the matched WikiText mechanism comparison."""
+        gpu = self._gpu_info(device)
+        device_label = (
+            f"{gpu[0]} ({gpu[1]}) · {device}" if gpu else str(device)
+        )
+        lengths = ", ".join(f"{length:,}" for length in eval_sequence_lengths)
+        mechanism_label = ", ".join(mechanisms)
+        if not _RICH_AVAILABLE:
+            self.console.print(
+                "NLP evaluation | "
+                f"device={device_label} dtype={dtype} output={output_dir}"
+            )
+            self.console.print(
+                f"Protocol | mechanisms={mechanism_label}; "
+                f"steps={train_steps:,} train length={train_sequence_length:,} "
+                f"batch={batch_size:,}; evaluate lengths={lengths} "
+                f"with {eval_batches:,} × {eval_batch_size:,} examples; "
+                f"score final {eval_tail_tokens:,} aligned tokens"
+            )
+            return
+
+        runtime = Table.grid(padding=(0, 1))
+        runtime.add_column(style="bold cyan", no_wrap=True)
+        runtime.add_column()
+        runtime.add_row("Device", device_label)
+        runtime.add_row("Precision", dtype)
+        runtime.add_row("Output", str(output_dir))
+
+        protocol = Table.grid(padding=(0, 1))
+        protocol.add_column(style="bold magenta", no_wrap=True)
+        protocol.add_column()
+        protocol.add_row("Mechanisms", mechanism_label)
+        protocol.add_row("Updates per model", f"{train_steps:,}")
+        protocol.add_row(
+            "Training examples",
+            f"{batch_size:,} × {train_sequence_length:,} tokens",
+        )
+        protocol.add_row("Evaluation contexts", lengths)
+        protocol.add_row("Aligned scored tail", f"{eval_tail_tokens:,} tokens")
+        protocol.add_row(
+            "Held-out examples",
+            f"{eval_batches:,} batches × {eval_batch_size:,}",
+        )
+
+        layout = Table.grid(padding=(0, 4))
+        layout.add_row(runtime, protocol)
+        self.console.print(
+            Panel(
+                layout,
+                title=Text("WikiText Mechanism Evaluation", style="bold"),
+                subtitle="matched parameters · identical token windows",
+                border_style="cyan",
+                expand=False,
+            )
+        )
+
+    def language_evaluation_case(
+        self,
+        *,
+        index: int,
+        total: int,
+        mechanism: str,
+        parameters: int,
+        trainable_parameters: int,
+        d_ff: int,
+        ffn_type: str = "gelu",
+        n_quats: int | None = None,
+    ) -> None:
+        """Introduce one mechanism in the WikiText comparison."""
+        ffn_label = (
+            f"QuatSpin · {n_quats:,} quaternions"
+            if ffn_type == "quatspin" and n_quats is not None
+            else f"GELU · width {d_ff:,}"
+        )
+        if not _RICH_AVAILABLE:
+            self.console.print(
+                f"Model {index}/{total} | {mechanism} | "
+                f"parameters={parameters:,} trainable={trainable_parameters:,} "
+                f"ffn={ffn_label}"
+            )
+            return
+        details = Table.grid(padding=(0, 1))
+        details.add_column(style="bold cyan", no_wrap=True)
+        details.add_column()
+        details.add_row("Parameters", f"{parameters:,}")
+        details.add_row("Trainable", f"{trainable_parameters:,}")
+        details.add_row("FFN", ffn_label)
+        self.console.print(
+            Panel(
+                details,
+                title=Text.assemble(
+                    (f"Model {index}/{total}", "bold white"),
+                    ("  ", "white"),
+                    (mechanism, "bold magenta"),
+                ),
+                border_style="magenta",
+                expand=False,
+            )
+        )
+
     def evaluation_header(
         self,
         *,

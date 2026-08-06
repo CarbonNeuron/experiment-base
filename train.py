@@ -9,6 +9,7 @@ from config import (
     COMPILE_BACKENDS,
     COMPILE_MODES,
     DTYPES,
+    FFN_TYPES,
     HARD_NEGATIVE_BACKENDS,
     HARD_NEGATIVE_LOSSES,
     LOSS_BACKENDS,
@@ -41,6 +42,18 @@ def parse_args() -> argparse.Namespace:
     model.add_argument("--d-ff", type=int, default=512)
     model.add_argument("--seq-len", type=int, default=512)
     model.add_argument("--dropout", type=float, default=0.1)
+    model.add_argument(
+        "--ffn-type",
+        choices=FFN_TYPES,
+        default="gelu",
+        help="Feed-forward nonlinearity (gelu or activation-free quatspin)",
+    )
+    model.add_argument(
+        "--n-quats",
+        type=int,
+        default=None,
+        help="QuatSpin channels per FFN (default: d-model)",
+    )
 
     data = parser.add_argument_group("data")
     data.add_argument("--batch-size", type=int, default=8)
@@ -163,6 +176,8 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             d_ff=args.d_ff,
             max_seq_len=args.seq_len,
             dropout=args.dropout,
+            ffn_type=args.ffn_type,
+            n_quats=args.n_quats,
         ),
         data=DataConfig(
             batch_size=args.batch_size,

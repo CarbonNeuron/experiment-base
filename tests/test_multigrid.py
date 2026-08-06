@@ -7,10 +7,12 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from models import QuatSpinFFN
 from multigrid import (
     CausalProlongation,
     CausalRestriction,
     EpisodicMemory,
+    MultigridMemoryBlock,
     MultigridMemoryConfig,
     MultigridMemoryTransformer,
     VCycle,
@@ -21,6 +23,10 @@ from multigrid.triton_memory import (
     fused_softmax_memory,
     triton_memory_available,
 )
+try:
+    from multigrid.triton_factorized_memory import factorized_softmax_memory
+except ImportError:  # pragma: no cover - optional accelerator dependency
+    factorized_softmax_memory = None  # type: ignore[assignment]
 
 
 @pytest.fixture(scope="module")
@@ -102,6 +108,65 @@ def test_vcycle_output_shape_and_strict_causality() -> None:
     second = cycle(changed)
     assert first.shape == original.shape
     torch.testing.assert_close(first[:, :7], second[:, :7], atol=1e-6, rtol=1e-6)
+
+
+def test_vcycle_parameters_are_shared_across_context_scales() -> None:
+    short = VCycle(tiny_config(max_seq_len=8))
+    long = VCycle(tiny_config(max_seq_len=2048))
+
+    assert sum(parameter.numel() for parameter in short.parameters()) == sum(
+        parameter.numel() for parameter in long.parameters()
+    )
+
+
+def test_short_context_updates_every_vcycle_parameter() -> None:
+    cycle = VCycle(tiny_config(max_seq_len=64))
+    source = torch.randn(2, 8, 8, requires_grad=True)
+
+    cycle(source).square().mean().backward()
+
+    missing = [
+        name
+        for name, parameter in cycle.named_parameters()
+        if parameter.requires_grad and parameter.grad is None
+    ]
+    assert missing == []
+
+
+def test_zero_multigrid_correction_does_not_duplicate_residual() -> None:
+    block = MultigridMemoryBlock(tiny_config(dropout=0.0))
+    for parameter in block.multigrid.parameters():
+        nn.init.zeros_(parameter)
+    for parameter in block.ffn.parameters():
+        nn.init.zeros_(parameter)
+    nn.init.zeros_(block.memory.value_proj.weight)
+    nn.init.zeros_(block.memory.value_proj.bias)
+    source = torch.randn(2, 8, 8)
+
+    output, _ = block(source)
+
+    torch.testing.assert_close(output, source)
+
+
+def test_multigrid_block_selects_quatspin_ffn_and_backpropagates() -> None:
+    block = MultigridMemoryBlock(
+        tiny_config(ffn_type="quatspin", n_quats=3, dropout=0.0)
+    )
+    assert isinstance(block.ffn, QuatSpinFFN)
+    source = torch.randn(2, 8, 8, requires_grad=True)
+
+    output, _ = block(source)
+    output.square().mean().backward()
+
+    assert source.grad is not None
+    assert all(parameter.grad is not None for parameter in block.ffn.parameters())
+
+
+def test_multigrid_config_rejects_invalid_ffn_settings() -> None:
+    with pytest.raises(ValueError, match="ffn_type"):
+        tiny_config(ffn_type="unknown")
+    with pytest.raises(ValueError, match="n_quats"):
+        tiny_config(ffn_type="quatspin", n_quats=0)
 
 
 def test_cross_block_memory_remains_causal(embed_path: Path) -> None:
@@ -507,3 +572,38 @@ def test_triton_memory_matches_gradients_on_tensor_device() -> None:
         assert torch.cuda.current_device() == active_index
     finally:
         torch.cuda.set_device(original_device)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or not triton_memory_available()
+    or factorized_softmax_memory is None,
+    reason="factorized episodic memory requires CUDA/ROCm and Triton",
+)
+def test_factorized_memory_matches_recurrent_kernel() -> None:
+    device = torch.device(f"cuda:{torch.cuda.device_count() - 1}")
+    torch.manual_seed(97)
+    inputs = (
+        torch.randn(2, 5, 4, device=device, requires_grad=True),
+        torch.randn(2, 4, 5, 4, device=device, requires_grad=True),
+        torch.randn(2, 4, 5, 4, device=device, requires_grad=True),
+        torch.rand(2, 4, 5, device=device, requires_grad=True),
+    )
+    reference_inputs = tuple(
+        tensor.detach().clone().requires_grad_() for tensor in inputs
+    )
+    factorized = factorized_softmax_memory(*inputs, 4, 0.1)
+    reference = fused_softmax_memory(*reference_inputs, 4, 0.1)
+    for actual, expected in zip(factorized, reference, strict=True):
+        torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+
+    factorized_loss = sum(tensor.square().sum() for tensor in factorized)
+    reference_loss = sum(tensor.square().sum() for tensor in reference)
+    factorized_gradients = torch.autograd.grad(factorized_loss, inputs)
+    reference_gradients = torch.autograd.grad(
+        reference_loss, reference_inputs
+    )
+    for actual, expected in zip(
+        factorized_gradients, reference_gradients, strict=True
+    ):
+        torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)

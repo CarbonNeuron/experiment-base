@@ -5,13 +5,17 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from config import FFN_TYPES
 from models.base import resolve_compile_backend
+from models.base import SVDLanguageModel
+from models.quatspin import QuatSpinFFN
 
 from .config import MultigridMemoryConfig
 from .layers import MemoryState, MultigridMemoryBlock
@@ -46,6 +50,8 @@ class SymbolicModelConfig:
     hash_top_k: int = 8
     use_triton_memory: bool = True
     position_scale: float = 0.02
+    ffn_type: str = "gelu"
+    n_quats: int | None = None
 
     def __post_init__(self) -> None:
         if self.mechanism not in MECHANISM_NAMES:
@@ -66,6 +72,10 @@ class SymbolicModelConfig:
             raise ValueError("dropout must be in [0, 1)")
         if self.position_scale < 0.0:
             raise ValueError("position_scale must be non-negative")
+        if self.ffn_type not in FFN_TYPES:
+            raise ValueError(f"ffn_type must be one of {FFN_TYPES}")
+        if self.n_quats is not None and self.n_quats <= 0:
+            raise ValueError("n_quats must be positive when set")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -87,13 +97,20 @@ def _sinusoidal_positions(length: int, width: int) -> Tensor:
 class _FeedForward(nn.Module):
     def __init__(self, config: SymbolicModelConfig) -> None:
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(config.d_model, config.d_ff),
-            nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.d_ff, config.d_model),
-            nn.Dropout(config.dropout),
-        )
+        if config.ffn_type == "quatspin":
+            self.layers = QuatSpinFFN(
+                config.d_model,
+                n_quats=config.n_quats,
+                dropout=config.dropout,
+            )
+        else:
+            self.layers = nn.Sequential(
+                nn.Linear(config.d_model, config.d_ff),
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.d_ff, config.d_model),
+                nn.Dropout(config.dropout),
+            )
 
     def forward(self, x: Tensor) -> Tensor:
         return self.layers(x)
@@ -287,6 +304,66 @@ class _GRUBlock(nn.Module):
         return x + self.ffn(self.ffn_norm(x))
 
 
+def _build_blocks(config: SymbolicModelConfig) -> nn.ModuleList:
+    """Construct one parameter-matched stack for either evaluation frontend."""
+    if config.mechanism == "multigrid":
+        multigrid_config = MultigridMemoryConfig(
+            d_model=config.d_model,
+            n_layers=config.n_layers,
+            n_cycles=config.n_cycles,
+            d_ff=config.d_ff,
+            max_seq_len=config.max_seq_len,
+            dropout=config.dropout,
+            n_memory_slots=config.n_memory_slots,
+            d_memory=config.d_memory,
+            d_key=config.d_key,
+            memory_addressing=config.memory_addressing,
+            n_hash_bits=config.n_hash_bits,
+            hash_top_k=config.hash_top_k,
+            use_triton_memory=config.use_triton_memory,
+            ffn_type=config.ffn_type,
+            n_quats=config.n_quats,
+        )
+        return nn.ModuleList(
+            MultigridMemoryBlock(multigrid_config)
+            for _ in range(config.n_layers)
+        )
+    if config.mechanism == "softmax":
+        return nn.ModuleList(
+            _ResidualBlock(config, _SoftmaxAttention(config))
+            for _ in range(config.n_layers)
+        )
+    if config.mechanism == "linear_attention":
+        return nn.ModuleList(
+            _ResidualBlock(config, _LinearAttention(config))
+            for _ in range(config.n_layers)
+        )
+    if config.mechanism == "ssm":
+        return nn.ModuleList(
+            _ResidualBlock(config, _DiagonalSSM(config))
+            for _ in range(config.n_layers)
+        )
+    return nn.ModuleList(
+        _GRUBlock(config) for _ in range(config.n_layers)
+    )
+
+
+def _run_blocks(
+    blocks: nn.ModuleList,
+    hidden: Tensor,
+    mechanism: str,
+) -> Tensor:
+    """Apply a mechanism stack while preserving multigrid's shared memory."""
+    if mechanism == "multigrid":
+        state: MemoryState | None = None
+        for block in blocks:
+            hidden, state = block(hidden, state)
+        return hidden
+    for block in blocks:
+        hidden = block(hidden)
+    return hidden
+
+
 class SymbolicSequenceModel(nn.Module):
     """Small-vocabulary model used to isolate a sequence mechanism."""
 
@@ -301,45 +378,7 @@ class SymbolicSequenceModel(nn.Module):
             persistent=False,
         )
         self.dropout = nn.Dropout(config.dropout)
-        if config.mechanism == "multigrid":
-            multigrid_config = MultigridMemoryConfig(
-                d_model=config.d_model,
-                n_layers=config.n_layers,
-                n_cycles=config.n_cycles,
-                d_ff=config.d_ff,
-                max_seq_len=config.max_seq_len,
-                dropout=config.dropout,
-                n_memory_slots=config.n_memory_slots,
-                d_memory=config.d_memory,
-                d_key=config.d_key,
-                memory_addressing=config.memory_addressing,
-                n_hash_bits=config.n_hash_bits,
-                hash_top_k=config.hash_top_k,
-                use_triton_memory=config.use_triton_memory,
-            )
-            self.blocks = nn.ModuleList(
-                MultigridMemoryBlock(multigrid_config)
-                for _ in range(config.n_layers)
-            )
-        elif config.mechanism == "softmax":
-            self.blocks = nn.ModuleList(
-                _ResidualBlock(config, _SoftmaxAttention(config))
-                for _ in range(config.n_layers)
-            )
-        elif config.mechanism == "linear_attention":
-            self.blocks = nn.ModuleList(
-                _ResidualBlock(config, _LinearAttention(config))
-                for _ in range(config.n_layers)
-            )
-        elif config.mechanism == "ssm":
-            self.blocks = nn.ModuleList(
-                _ResidualBlock(config, _DiagonalSSM(config))
-                for _ in range(config.n_layers)
-            )
-        else:
-            self.blocks = nn.ModuleList(
-                _GRUBlock(config) for _ in range(config.n_layers)
-            )
+        self.blocks = _build_blocks(config)
         self.final_norm = nn.LayerNorm(config.d_model)
         self.output = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.apply(self._initialize)
@@ -363,13 +402,7 @@ class SymbolicSequenceModel(nn.Module):
             raise ValueError("sequence exceeds configured max_seq_len")
         hidden = self.embedding(input_ids)
         hidden = self.dropout(hidden + self.positions[: input_ids.size(1)])
-        if self.config.mechanism == "multigrid":
-            state: MemoryState | None = None
-            for block in self.blocks:
-                hidden, state = block(hidden, state)
-        else:
-            for block in self.blocks:
-                hidden = block(hidden)
+        hidden = _run_blocks(self.blocks, hidden, self.config.mechanism)
         return self.final_norm(hidden)
 
     def _forward_eager(self, input_ids: Tensor) -> Tensor:
@@ -446,17 +479,77 @@ class SymbolicSequenceModel(nn.Module):
         return sum(parameter.numel() for parameter in self.parameters())
 
 
+class MechanismLanguageModel(SVDLanguageModel):
+    """Full-vocabulary LM frontend for the matched sequence mechanisms.
+
+    Token directions and the tied output projection come from ``svd-embeds``.
+    Fixed sinusoidal positions keep the length sweep meaningful beyond the
+    training context instead of evaluating randomly initialized position rows.
+    """
+
+    def __init__(
+        self,
+        config: SymbolicModelConfig,
+        embed_path: str | Path | None = None,
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.embedding_dropout = nn.Dropout(config.dropout)
+        self.register_buffer(
+            "positions",
+            config.position_scale
+            * _sinusoidal_positions(config.max_seq_len, config.d_model),
+            persistent=False,
+        )
+        self.blocks = _build_blocks(config)
+        self.final_norm = nn.LayerNorm(config.d_model)
+        self._finish_initialization(
+            config.d_model,
+            config.max_seq_len,
+            embed_path,
+        )
+        # The evaluator deliberately uses fixed positions for extrapolation.
+        # Keep the library-owned table out of optimization and parameter-match
+        # accounting remains identical for every mechanism.
+        self.embeddings.position_embedding.requires_grad_(False)
+
+    def _encode_hidden(self, input_ids: Tensor) -> Tensor:
+        hidden = self.embeddings(input_ids, include_positions=False)
+        hidden = self.embedding_dropout(
+            hidden + self.positions[: input_ids.size(1)]
+        )
+        hidden = _run_blocks(
+            self.blocks,
+            hidden,
+            self.config.mechanism,
+        )
+        return self.final_norm(hidden)
+
+
 def matched_model_configs(
     base: SymbolicModelConfig,
     mechanisms: tuple[str, ...],
 ) -> dict[str, SymbolicModelConfig]:
-    """Match baselines to the multigrid parameter count by adjusting FFN width."""
+    """Match baselines by adjusting GELU width or quaternion channels."""
     reference_config = replace(base, mechanism="multigrid")
     target = SymbolicSequenceModel(reference_config).num_parameters()
     configs: dict[str, SymbolicModelConfig] = {}
     for mechanism in mechanisms:
         if mechanism == "multigrid":
             configs[mechanism] = reference_config
+            continue
+        if base.ffn_type == "quatspin":
+            probe = replace(base, mechanism=mechanism, n_quats=1)
+            low_count = SymbolicSequenceModel(probe).num_parameters()
+            wider = replace(probe, n_quats=2)
+            per_channel = (
+                SymbolicSequenceModel(wider).num_parameters() - low_count
+            )
+            channels = max(
+                1,
+                round(1 + (target - low_count) / max(1, per_channel)),
+            )
+            configs[mechanism] = replace(probe, n_quats=channels)
             continue
         probe = replace(base, mechanism=mechanism, d_ff=8)
         low_count = SymbolicSequenceModel(probe).num_parameters()

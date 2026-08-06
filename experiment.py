@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 
-from config import ExperimentConfig
+from config import FFN_TYPES, ExperimentConfig
 from data import build_dataloaders
 from experiments import (
     DEFAULT_REGISTRY,
@@ -30,6 +30,18 @@ def _parse_overrides() -> argparse.Namespace:
                         help="Enable torch.compile")
     parser.add_argument("--no-compile", dest="compile", action="store_false",
                         help="Disable torch.compile")
+    parser.add_argument(
+        "--ffn-type",
+        choices=FFN_TYPES,
+        default=None,
+        help="Override FFN type for architectures that support selection",
+    )
+    parser.add_argument(
+        "--n-quats",
+        type=int,
+        default=None,
+        help="Override QuatSpin channels for supported architectures",
+    )
     args, _ = parser.parse_known_args()
     return args
 
@@ -41,8 +53,8 @@ def run_experiment(
 ) -> Path:
     """Compose and run a registered model without embedding CLI concerns.
 
-    Supports CLI overrides via ``--device``, ``--dtype``, ``--compile`` /
-    ``--no-compile`` without per-script argparse boilerplate.
+    Supports runtime and FFN CLI overrides without per-script argparse
+    boilerplate. FFN overrides require matching fields on the model config.
     """
     overrides = _parse_overrides()
     if overrides.device is not None:
@@ -51,6 +63,20 @@ def run_experiment(
         config.runtime.dtype = overrides.dtype
     if overrides.compile is not None:
         config.runtime.compile = overrides.compile
+    if overrides.ffn_type is not None:
+        if not hasattr(config.model, "ffn_type"):
+            raise ValueError(
+                f"{type(config.model).__name__} does not support FFN selection"
+            )
+        config.model.ffn_type = overrides.ffn_type
+    if overrides.n_quats is not None:
+        if overrides.n_quats <= 0:
+            raise ValueError("n_quats must be positive")
+        if not hasattr(config.model, "n_quats"):
+            raise ValueError(
+                f"{type(config.model).__name__} does not support n_quats"
+            )
+        config.model.n_quats = overrides.n_quats
 
     logger = PrettyLogger()
     torch.manual_seed(config.training.seed)

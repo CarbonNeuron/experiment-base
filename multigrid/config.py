@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from config import FFN_TYPES
+
 
 @dataclass
 class MultigridMemoryConfig:
@@ -25,6 +27,8 @@ class MultigridMemoryConfig:
     n_hash_bits: int = 32
     hash_top_k: int = 8
     use_triton_memory: bool = True
+    ffn_type: str = "gelu"
+    n_quats: int | None = None
 
     def __post_init__(self) -> None:
         positive = (
@@ -47,6 +51,10 @@ class MultigridMemoryConfig:
             raise ValueError("dropout must be in [0, 1)")
         if self.memory_addressing not in ("softmax", "hash"):
             raise ValueError("memory_addressing must be 'softmax' or 'hash'")
+        if self.ffn_type not in FFN_TYPES:
+            raise ValueError(f"ffn_type must be one of {FFN_TYPES}")
+        if self.n_quats is not None and self.n_quats <= 0:
+            raise ValueError("n_quats must be positive when set")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

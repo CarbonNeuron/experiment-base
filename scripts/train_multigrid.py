@@ -27,6 +27,8 @@ CONFIG = ExperimentConfig(
         n_memory_slots=256,
         d_memory=64,
         d_key=64,
+        ffn_type="gelu",
+        n_quats=None,
     ),
     data=DataConfig(batch_size=8, num_workers=2),
     training=TrainingConfig(epochs=3, grad_accum_steps=1, ce_backend="full"),
