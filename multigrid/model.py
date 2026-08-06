@@ -7,13 +7,14 @@ from typing import Any
 
 import torch
 from torch import Tensor, nn
-from svd_embeds import OpenAIEmbedding
+
+from models.base import SVDLanguageModel
 
 from .config import MultigridMemoryConfig
 from .layers import MemoryState, MultigridMemoryBlock
 
 
-class MultigridMemoryTransformer(nn.Module):
+class MultigridMemoryTransformer(SVDLanguageModel):
     """Attention-free decoder with tied frozen-direction SVD embeddings."""
 
     def __init__(
@@ -35,15 +36,10 @@ class MultigridMemoryTransformer(nn.Module):
         self.final_norm = nn.LayerNorm(
             config.d_model, eps=config.layer_norm_eps
         )
-        self.apply(self._init_weights)
-
-        embedding_kwargs = (
-            {"embedding_path": embed_path} if embed_path is not None else {}
-        )
-        self.embeddings = OpenAIEmbedding(
+        self._finish_initialization(
             config.d_model,
-            max_seq_len=config.max_seq_len,
-            **embedding_kwargs,
+            config.max_seq_len,
+            embed_path,
         )
 
     @staticmethod
@@ -56,24 +52,10 @@ class MultigridMemoryTransformer(nn.Module):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
 
-    @property
-    def vocab_size(self) -> int:
-        return self.embeddings.num_embeddings
-
-    def effective_embeddings(self) -> Tensor:
-        return self.embeddings.weight
-
-    def encode(self, input_ids: Tensor) -> Tensor:
-        if input_ids.ndim != 2:
-            raise ValueError("input_ids must have shape [batch, sequence]")
+    def _encode_hidden(self, input_ids: Tensor) -> Tensor:
         seq_len = input_ids.size(1)
         if seq_len == 0:
             raise ValueError("input_ids sequence must not be empty")
-        if seq_len > self.config.max_seq_len:
-            raise ValueError(
-                f"sequence length {seq_len} exceeds max_seq_len="
-                f"{self.config.max_seq_len}"
-            )
 
         hidden = self.embedding_dropout(self.embeddings(input_ids))
         memory_state: MemoryState | None = None
@@ -81,18 +63,5 @@ class MultigridMemoryTransformer(nn.Module):
             hidden, memory_state = block(hidden, memory_state)
         return self.final_norm(hidden)
 
-    def logits(self, hidden: Tensor) -> Tensor:
-        return self.embeddings.project(hidden)
-
     def forward(self, input_ids: Tensor) -> Tensor:
         return self.logits(self.encode(input_ids))
-
-    def num_parameters(self, trainable_only: bool = False) -> int:
-        count = sum(
-            parameter.numel()
-            for parameter in self.parameters()
-            if not trainable_only or parameter.requires_grad
-        )
-        if not trainable_only:
-            count += self.embeddings.directions.numel()
-        return count

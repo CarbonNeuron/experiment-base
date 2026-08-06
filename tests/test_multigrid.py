@@ -16,6 +16,11 @@ from multigrid import (
     VCycle,
     associative_recall,
 )
+from multigrid.layers import MemoryWrites
+from multigrid.triton_memory import (
+    fused_softmax_memory,
+    triton_memory_available,
+)
 
 
 @pytest.fixture(scope="module")
@@ -141,6 +146,28 @@ def test_episodic_memory_causality() -> None:
     assert not torch.allclose(first_state.keys, second_state.keys)
 
 
+def test_episodic_memory_batches_state_independent_projections() -> None:
+    memory = EpisodicMemory(tiny_config())
+    source = torch.randn(3, 6, 8)
+    prediction = torch.randn(3, 6, 8)
+    value_shapes: list[torch.Size] = []
+    gate_shapes: list[torch.Size] = []
+    value_hook = memory.value_proj.register_forward_pre_hook(
+        lambda _module, inputs: value_shapes.append(inputs[0].shape)
+    )
+    gate_hook = memory.read_gate.register_forward_pre_hook(
+        lambda _module, inputs: gate_shapes.append(inputs[0].shape)
+    )
+    try:
+        memory(source, prediction)
+    finally:
+        value_hook.remove()
+        gate_hook.remove()
+
+    assert value_shapes == [torch.Size((3, 6, 4))]
+    assert gate_shapes == [torch.Size((3, 6, 16))]
+
+
 def test_gradient_flow(embed_path: Path) -> None:
     torch.manual_seed(5)
     model = MultigridMemoryTransformer(tiny_config(max_seq_len=8), embed_path)
@@ -155,6 +182,19 @@ def test_gradient_flow(embed_path: Path) -> None:
     ]
     assert missing == []
     assert model.embeddings.directions.grad is None
+
+
+def test_compiled_encoder_supports_batched_memory(embed_path: Path) -> None:
+    model = MultigridMemoryTransformer(tiny_config(max_seq_len=8), embed_path)
+    model.eval()
+    input_ids = torch.randint(model.vocab_size, (3, 8))
+    with torch.no_grad():
+        eager = model.encode(input_ids)
+        selected = model.compile_encoder(backend="eager")
+        compiled = model.encode(input_ids)
+
+    assert selected == "eager"
+    torch.testing.assert_close(compiled, eager)
 
 
 @pytest.mark.parametrize("seq_len", [1, 2, 3, 5, 9, 16])
@@ -280,3 +320,190 @@ def test_num_parameters(embed_path: Path) -> None:
     total = trainable + model.embeddings.directions.numel()
     assert model.num_parameters(trainable_only=True) == trainable
     assert model.num_parameters() == total
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not triton_memory_available(),
+    reason="fused episodic memory requires CUDA/ROCm and Triton",
+)
+def test_triton_memory_matches_gradients_on_tensor_device() -> None:
+    original_device = torch.cuda.current_device()
+    target_index = torch.cuda.device_count() - 1
+    active_index = 0 if target_index != 0 else target_index
+    torch.cuda.set_device(active_index)
+    device = torch.device(f"cuda:{target_index}")
+    try:
+        torch.manual_seed(83)
+        batch_size, seq_len, n_writers = 2, 3, 4
+        memory = EpisodicMemory(
+            tiny_config(n_memory_slots=4, d_memory=4, d_key=4)
+        ).to(device)
+        memory.train()
+        queries = torch.randn(
+            batch_size, seq_len, 4, device=device, requires_grad=True
+        )
+        write_values = torch.randn(
+            batch_size,
+            n_writers,
+            seq_len,
+            4,
+            device=device,
+            requires_grad=True,
+        )
+        write_keys = torch.randn_like(write_values, requires_grad=True)
+        write_priorities = torch.sigmoid(
+            torch.randn(batch_size, n_writers, seq_len, device=device)
+        ).requires_grad_()
+        state = memory.initial_state(
+            batch_size, device=device, dtype=queries.dtype
+        )
+        history = tuple(
+            MemoryWrites(
+                write_values[:, writer],
+                write_keys[:, writer],
+                write_priorities[:, writer],
+            )
+            for writer in range(n_writers - 1)
+        )
+        eager_reads, eager_state = memory._run_recurrence(
+            queries,
+            state,
+            history,
+            write_values[:, -1],
+            write_keys[:, -1],
+            write_priorities[:, -1],
+            True,
+        )
+        fused_reads, fused_values, fused_keys, fused_priorities = (
+            fused_softmax_memory(
+                queries,
+                write_values,
+                write_keys,
+                write_priorities,
+                4,
+                memory.temperature,
+            )
+        )
+        torch.testing.assert_close(fused_reads, eager_reads, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(
+            fused_values, eager_state.values, atol=1e-6, rtol=1e-6
+        )
+        torch.testing.assert_close(
+            fused_keys, eager_state.keys, atol=1e-6, rtol=1e-6
+        )
+        torch.testing.assert_close(
+            fused_priorities,
+            eager_state.priorities,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+        fused_loss = sum(
+            tensor.square().sum()
+            for tensor in (
+                fused_reads,
+                fused_values,
+                fused_keys,
+                fused_priorities,
+            )
+        )
+        eager_loss = sum(
+            tensor.square().sum()
+            for tensor in (
+                eager_reads,
+                eager_state.values,
+                eager_state.keys,
+                eager_state.priorities,
+            )
+        )
+        inputs = (queries, write_values, write_keys, write_priorities)
+        fused_gradients = torch.autograd.grad(
+            fused_loss, inputs, retain_graph=True
+        )
+        eager_gradients = torch.autograd.grad(eager_loss, inputs)
+        for fused_gradient, eager_gradient in zip(
+            fused_gradients, eager_gradients
+        ):
+            torch.testing.assert_close(
+                fused_gradient,
+                eager_gradient,
+                atol=2e-5,
+                rtol=2e-5,
+            )
+
+        # Change every query and write in the future while keeping the same
+        # row and tensor shape. Earlier reads must remain bit-identical; using
+        # a different batch row can introduce unrelated GEMM rounding noise.
+        boundary = 2
+        changed_queries = queries.detach().clone()
+        changed_values = write_values.detach().clone()
+        changed_keys = write_keys.detach().clone()
+        changed_priorities = write_priorities.detach().clone()
+        changed_queries[:, boundary:] = torch.randn_like(
+            changed_queries[:, boundary:]
+        )
+        changed_values[:, :, boundary:] = torch.randn_like(
+            changed_values[:, :, boundary:]
+        )
+        changed_keys[:, :, boundary:] = torch.randn_like(
+            changed_keys[:, :, boundary:]
+        )
+        changed_priorities[:, :, boundary:] = torch.rand_like(
+            changed_priorities[:, :, boundary:]
+        )
+        with torch.no_grad():
+            changed_reads, _, _, _ = fused_softmax_memory(
+                changed_queries,
+                changed_values,
+                changed_keys,
+                changed_priorities,
+                4,
+                memory.temperature,
+            )
+        torch.testing.assert_close(
+            changed_reads[:, :boundary],
+            fused_reads[:, :boundary],
+            atol=0.0,
+            rtol=0.0,
+        )
+
+        memory.eval()
+        eval_state = memory.initial_state(
+            batch_size, device=device, dtype=queries.dtype
+        )
+        with torch.no_grad():
+            eval_reads, eval_state = memory._run_recurrence(
+                queries,
+                eval_state,
+                history,
+                write_values[:, -1],
+                write_keys[:, -1],
+                write_priorities[:, -1],
+                True,
+            )
+            (
+                fused_eval_reads,
+                fused_eval_values,
+                fused_eval_keys,
+                fused_eval_priorities,
+            ) = fused_softmax_memory(
+                queries,
+                write_values,
+                write_keys,
+                write_priorities,
+                4,
+                memory.temperature,
+                hard_overwrite=True,
+            )
+        torch.testing.assert_close(
+            fused_eval_reads, eval_reads, atol=1e-6, rtol=1e-6
+        )
+        torch.testing.assert_close(fused_eval_values, eval_state.values)
+        torch.testing.assert_close(fused_eval_keys, eval_state.keys)
+        torch.testing.assert_close(
+            fused_eval_priorities, eval_state.priorities
+        )
+        assert fused_reads.device == device
+        assert torch.cuda.current_device() == active_index
+    finally:
+        torch.cuda.set_device(original_device)

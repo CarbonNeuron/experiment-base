@@ -102,6 +102,7 @@ if _RICH_AVAILABLE:
             ("epoch", 5, "white", "bold white"),
             ("loss", 6, "yellow", "bold yellow"),
             ("lr", 8, "magenta", "bold magenta"),
+            ("capacity", 3, "cyan", "bold cyan"),
             ("hard", 6, "red", "bold red"),
             ("margin", 5, "green", "bold green"),
         )
@@ -456,6 +457,179 @@ class PrettyLogger:
                 ("✓ ", "bold green"),
                 (split, "bold cyan"),
                 (f": {token_count:,} tokens", "white"),
+            )
+        )
+
+    def evaluation_header(
+        self,
+        *,
+        device: Any,
+        dtype: str,
+        compile_description: str,
+        seed: int,
+        output_dir: Any,
+        train_capacity: int,
+        curriculum_capacities: tuple[int, ...],
+        capacities: tuple[int, ...],
+        train_steps: int,
+        batch_size: int,
+        eval_batches: int,
+        tasks: tuple[tuple[str, str], ...],
+        mechanisms: tuple[Mapping[str, Any], ...],
+    ) -> None:
+        """Describe a complete primitive-evaluation protocol before it runs."""
+        gpu = self._gpu_info(device)
+        device_label = (
+            f"{gpu[0]} ({gpu[1]}) · {device}" if gpu else str(device)
+        )
+        capacity_label = ", ".join(str(value) for value in capacities)
+        curriculum_label = " → ".join(
+            str(value) for value in curriculum_capacities
+        )
+        if not _RICH_AVAILABLE:
+            self.console.print(
+                "Primitive evaluation | "
+                f"device={device_label} dtype={dtype} compile={compile_description} "
+                f"seed={seed} output={output_dir}"
+            )
+            self.console.print(
+                f"Protocol | curriculum={curriculum_label} "
+                f"train capacity={train_capacity} steps={train_steps:,} "
+                f"batch={batch_size:,}; evaluate capacities={capacity_label} "
+                f"with {eval_batches:,} batches each"
+            )
+            for name, description in tasks:
+                self.console.print(f"Task {name}: {description}")
+            for mechanism in mechanisms:
+                self.console.print(
+                    f"Mechanism {mechanism['name']}: "
+                    f"parameters={int(mechanism['parameters']):,} "
+                    f"d_ff={int(mechanism['d_ff']):,}"
+                )
+            return
+
+        runtime = Table.grid(padding=(0, 1))
+        runtime.add_column(style="bold cyan", no_wrap=True)
+        runtime.add_column()
+        runtime.add_row("Device", device_label)
+        runtime.add_row("Precision", dtype)
+        runtime.add_row("Compilation", compile_description)
+        runtime.add_row("Seed", f"{seed:,}")
+        runtime.add_row("Output", str(output_dir))
+
+        protocol = Table.grid(padding=(0, 1))
+        protocol.add_column(style="bold magenta", no_wrap=True)
+        protocol.add_column()
+        protocol.add_row("Curriculum", curriculum_label)
+        protocol.add_row(
+            "Compiled tensor shape", f"capacity {train_capacity:,} (fixed)"
+        )
+        protocol.add_row("Evaluation capacities", capacity_label)
+        protocol.add_row("Updates per test", f"{train_steps:,}")
+        protocol.add_row("Training batch", f"{batch_size:,}")
+        protocol.add_row(
+            "Held-out examples",
+            f"{eval_batches * batch_size:,} per capacity",
+        )
+
+        overview = Table.grid(padding=(0, 4))
+        overview.add_row(runtime, protocol)
+
+        task_table = Table(
+            "Diagnostic",
+            "What it tests",
+            header_style="bold cyan",
+            box=None,
+            padding=(0, 1),
+        )
+        for name, description in tasks:
+            task_table.add_row(Text(name, style="cyan"), description)
+
+        mechanism_table = Table(
+            "Mechanism",
+            "Parameters",
+            "Δ vs multigrid",
+            "FFN width",
+            header_style="bold magenta",
+            box=None,
+            padding=(0, 1),
+        )
+        for mechanism in mechanisms:
+            parameters = int(mechanism["parameters"])
+            delta = int(mechanism["delta_vs_multigrid"])
+            mechanism_table.add_row(
+                Text(str(mechanism["name"]), style="magenta"),
+                f"{parameters:,}",
+                f"{delta:+,}",
+                f"{int(mechanism['d_ff']):,}",
+            )
+
+        contents = Table.grid(padding=(1, 0))
+        contents.add_row(overview)
+        contents.add_row(task_table)
+        contents.add_row(mechanism_table)
+        self.console.print(
+            Panel(
+                contents,
+                title=Text("Primitive Evaluation", style="bold"),
+                subtitle="fixed-length training · held-out capacity sweep",
+                border_style="cyan",
+                expand=False,
+            )
+        )
+
+    def evaluation_case(
+        self,
+        *,
+        index: int,
+        total: int,
+        mechanism: str,
+        task: str,
+        description: str,
+        parameters: int,
+        d_ff: int,
+        train_capacity: int,
+        sequence_length: int,
+        answers_per_example: int,
+        capacities: tuple[int, ...],
+    ) -> None:
+        """Introduce one mechanism/task training run and its measurements."""
+        capacity_label = ", ".join(str(value) for value in capacities)
+        if not _RICH_AVAILABLE:
+            self.console.print(
+                f"Test {index}/{total} | {mechanism} × {task} | {description} | "
+                f"params={parameters:,} d_ff={d_ff:,} "
+                f"train capacity={train_capacity:,} length={sequence_length:,} "
+                f"answers={answers_per_example:,} | evaluate={capacity_label}"
+            )
+            return
+
+        details = Table.grid(padding=(0, 1))
+        details.add_column(style="bold cyan", no_wrap=True)
+        details.add_column()
+        details.add_row("Question", description)
+        details.add_row(
+            "Training example",
+            f"capacity {train_capacity:,} · {sequence_length:,} tokens · "
+            f"{answers_per_example:,} supervised answer(s)",
+        )
+        details.add_row("Capacity sweep", capacity_label)
+        details.add_row(
+            "Model",
+            f"{parameters:,} parameters · FFN width {d_ff:,}",
+        )
+        self.console.print(
+            Panel(
+                details,
+                title=Text.assemble(
+                    (f"Test {index}/{total}", "bold white"),
+                    ("  ", "white"),
+                    (mechanism, "bold magenta"),
+                    (" × ", "dim"),
+                    (task, "bold cyan"),
+                ),
+                border_style="magenta",
+                expand=False,
             )
         )
 

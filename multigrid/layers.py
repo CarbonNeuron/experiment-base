@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +11,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .config import MultigridMemoryConfig
+from .triton_memory import fused_softmax_memory, triton_memory_available
 
 
 def _next_power_of_two(length: int) -> int:
@@ -78,9 +80,22 @@ class LocalRefinement(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: Tensor) -> Tensor:
-        channels_first = x.transpose(1, 2)
-        padded = F.pad(channels_first, (self.kernel_size - 1, 0))
-        refined = self.conv(padded).transpose(1, 2)
+        # MIOpen lowers these very short causal convolutions through thousands
+        # of im2col/col2im kernels. Materializing the three shifted views and
+        # applying one GEMM is algebraically identical and substantially faster
+        # at the multigrid pyramid's sequence lengths.
+        padded = F.pad(x, (0, 0, self.kernel_size - 1, 0))
+        context = torch.cat(
+            [
+                padded[:, offset : offset + x.size(1)]
+                for offset in range(self.kernel_size)
+            ],
+            dim=-1,
+        )
+        weight = self.conv.weight.permute(0, 2, 1).reshape(
+            self.conv.out_channels, -1
+        )
+        refined = F.linear(context, weight, self.conv.bias)
         return self.dropout(F.gelu(refined))
 
 
@@ -181,6 +196,8 @@ class EpisodicMemory(nn.Module):
         self.addressing_mode = config.memory_addressing
         self.n_hash_bits = config.n_hash_bits
         self.hash_top_k = config.hash_top_k
+        self.use_triton_memory = config.use_triton_memory
+        self._triton_failed = False
         self.key_width = (
             config.d_key
             if self.addressing_mode == "softmax"
@@ -232,20 +249,19 @@ class EpisodicMemory(nn.Module):
     def _read_from_state_softmax(
         self, query: Tensor, state: MemoryState
     ) -> Tensor:
-        """Read using a pre-projected query vector (softmax mode)."""
+        """Read a compressed value using a pre-projected softmax query."""
         scores = torch.bmm(query.unsqueeze(1), state.keys.transpose(1, 2))
         scores = scores.squeeze(1) / math.sqrt(self.d_key)
         valid = state.priorities.gt(0)
         weights = torch.softmax(scores.masked_fill(~valid, -1.0e4), dim=-1)
         weights = weights * valid.to(weights.dtype)
         weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
-        value = torch.bmm(weights.unsqueeze(1), state.values).squeeze(1)
-        return self.value_proj(value)
+        return torch.bmm(weights.unsqueeze(1), state.values).squeeze(1)
 
     def _read_from_state_hash(
         self, query_code: Tensor, state: MemoryState
     ) -> Tensor:
-        """Read using a pre-projected hash code (hash mode)."""
+        """Read a compressed value using a pre-projected hash code."""
         similarities = torch.bmm(
             query_code.unsqueeze(1), state.keys.transpose(1, 2)
         ).squeeze(1)
@@ -266,14 +282,54 @@ class EpisodicMemory(nn.Module):
         )
         weights = weights * top_valid.to(weights.dtype)
         weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
-        value = torch.bmm(weights.unsqueeze(1), top_values).squeeze(1)
-        return self.value_proj(value)
+        return torch.bmm(weights.unsqueeze(1), top_values).squeeze(1)
 
     def _read_from_state(self, query: Tensor, state: MemoryState) -> Tensor:
-        """Read using a pre-projected query/code vector."""
+        """Read a compressed value using a pre-projected query/code."""
         if self.addressing_mode == "hash":
             return self._read_from_state_hash(query, state)
         return self._read_from_state_softmax(query, state)
+
+    @torch.compiler.disable
+    def _run_recurrence(
+        self,
+        read_queries: Tensor,
+        state: MemoryState,
+        history: tuple[MemoryWrites, ...],
+        write_values: Tensor,
+        write_keys: Tensor,
+        write_priorities: Tensor,
+        replay_history: bool,
+    ) -> tuple[Tensor, MemoryState]:
+        """Run only the state-dependent part of the memory update.
+
+        Keeping this small recurrence eager prevents ``torch.compile`` from
+        unrolling a sequence-length-sized graph. All learned projections run
+        outside it over the complete batch and sequence dimensions.
+        """
+        reads: list[Tensor] = []
+        for position in range(read_queries.size(1)):
+            reads.append(
+                self._read_from_state(read_queries[:, position], state)
+            )
+
+            if replay_history:
+                for writes in history:
+                    state = self._apply_write(
+                        writes.values[:, position],
+                        writes.keys[:, position],
+                        writes.priorities[:, position],
+                        state,
+                    )
+
+            state = self._apply_write(
+                write_values[:, position],
+                write_keys[:, position],
+                write_priorities[:, position],
+                state,
+            )
+
+        return torch.stack(reads, dim=1), state
 
     def _apply_write(
         self,
@@ -320,6 +376,7 @@ class EpisodicMemory(nn.Module):
         )
         return MemoryState(values, keys, priorities, state.history)
 
+    @torch.compiler.disable
     def forward(
         self,
         x: Tensor,
@@ -344,86 +401,110 @@ class EpisodicMemory(nn.Module):
         else:
             working_state = state
 
-        # --- Precompute ALL projections in parallel (batch × seq_len) ---
-        # These are the expensive linear projections that don't depend on
-        # sequential memory state.  Doing them once avoids seq_len separate
-        # matmuls inside the loop.
-
-        # Surprise / write gate
-        error_all = x - prediction  # [B, T, D]
-        write_prob_all = torch.sigmoid(
-            self.write_gate(torch.cat((x, error_all), dim=-1))
-        )  # [B, T, 1]
-
-        # Compressed write values
-        compressed_all = self.compress(error_all) * write_prob_all  # [B, T, d_memory]
+        # Project every position together. Only slot reads and writes depend
+        # on the state produced by the preceding position.
+        error = x - prediction
+        write_probabilities = torch.sigmoid(
+            self.write_gate(torch.cat((x, error), dim=-1))
+        )
+        write_values = self.compress(error) * write_probabilities
 
         # Write keys
         if self.addressing_mode == "hash":
-            write_keys_all = self._hash_code(
+            write_keys = self._hash_code(
                 x.reshape(-1, x.size(-1))
-            ).reshape(batch_size, seq_len, -1)  # [B, T, n_hash_bits]
+            ).reshape(batch_size, seq_len, -1)
         else:
-            write_keys_all = self.hash_proj(x)  # [B, T, d_key]
+            write_keys = self.hash_proj(x)
 
         # Read queries
         if self.addressing_mode == "hash":
-            read_queries_all = self._hash_code(
+            read_queries = self._hash_code(
                 query.reshape(-1, query.size(-1))
-            ).reshape(batch_size, seq_len, -1)  # [B, T, n_hash_bits]
+            ).reshape(batch_size, seq_len, -1)
         else:
-            read_queries_all = self.query_proj(query)  # [B, T, d_key]
-
-        # Write priorities (squeezed)
-        priorities_all = write_prob_all.squeeze(-1)  # [B, T]
-
-        # Precompute history writes if replaying (just index slicing later)
-        # No projections needed — history already has values/keys/priorities.
-
-        # --- Sequential loop: only lightweight state bookkeeping ---
-        corrections: list[Tensor] = []
-        w_vals: list[Tensor] = []
-        w_keys: list[Tensor] = []
-        w_pris: list[Tensor] = []
-        for t in range(seq_len):
-            # Read from current memory state (tiny ops over n_slots)
-            query_t = query[:, t]
-            read_value = self._read_from_state(
-                read_queries_all[:, t], working_state
-            )
-            gate = torch.sigmoid(
-                self.read_gate(
-                    torch.cat((query_t, read_value), dim=-1)
+            read_queries = self.query_proj(query)
+        write_priorities = write_probabilities.squeeze(-1)
+        use_fused_recurrence = (
+            self.use_triton_memory
+            and not self._triton_failed
+            and triton_memory_available()
+            and x.is_cuda
+            and self.addressing_mode == "softmax"
+            and replay_history
+            and self.n_slots <= 128
+            and self.d_memory <= 128
+            and self.d_key <= 128
+            and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and (self.training or not torch.is_grad_enabled())
+        )
+        if use_fused_recurrence:
+            try:
+                writers = prior_history + (
+                    MemoryWrites(write_values, write_keys, write_priorities),
                 )
+                all_write_values = torch.stack(
+                    [writes.values for writes in writers], dim=1
+                )
+                all_write_keys = torch.stack(
+                    [writes.keys for writes in writers], dim=1
+                )
+                all_write_priorities = torch.stack(
+                    [writes.priorities for writes in writers], dim=1
+                )
+                (
+                    compressed_reads,
+                    final_values,
+                    final_keys,
+                    final_priorities,
+                ) = fused_softmax_memory(
+                    read_queries,
+                    all_write_values,
+                    all_write_keys,
+                    all_write_priorities,
+                    self.n_slots,
+                    self.temperature,
+                    hard_overwrite=not self.training,
+                )
+                working_state = MemoryState(
+                    final_values,
+                    final_keys,
+                    final_priorities,
+                )
+            except Exception as error:
+                self._triton_failed = True
+                use_fused_recurrence = False
+                warnings.warn(
+                    "fused Triton memory failed; using the PyTorch "
+                    f"recurrence: {type(error).__name__}: {error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        if not use_fused_recurrence:
+            compressed_reads, working_state = self._run_recurrence(
+                read_queries,
+                working_state,
+                prior_history,
+                write_values,
+                write_keys,
+                write_priorities,
+                replay_history,
             )
-            corrections.append(self.dropout(gate * read_value))
 
-            # Replay lower-block writes at this position
-            if replay_history:
-                for writes in prior_history:
-                    working_state = self._apply_write(
-                        writes.values[:, t],
-                        writes.keys[:, t],
-                        writes.priorities[:, t],
-                        working_state,
-                    )
-
-            # Apply this position's write (precomputed)
-            val_t = compressed_all[:, t]
-            key_t = write_keys_all[:, t]
-            pri_t = priorities_all[:, t]
-            working_state = self._apply_write(
-                val_t, key_t, pri_t, working_state
-            )
-            w_vals.append(val_t)
-            w_keys.append(key_t)
-            w_pris.append(pri_t)
+        # These used to be one small matrix multiplication per position. They
+        # are independent once the raw reads are known, so execute them as two
+        # large compiler-friendly projections over [batch, sequence].
+        read_values = self.value_proj(compressed_reads)
+        read_gates = torch.sigmoid(
+            self.read_gate(torch.cat((query, read_values), dim=-1))
+        )
+        corrections = self.dropout(read_gates * read_values)
 
         if replay_history:
             current_writes = MemoryWrites(
-                torch.stack(w_vals, dim=1),
-                torch.stack(w_keys, dim=1),
-                torch.stack(w_pris, dim=1),
+                write_values,
+                write_keys,
+                write_priorities,
             )
             working_state = MemoryState(
                 working_state.values,
@@ -431,7 +512,7 @@ class EpisodicMemory(nn.Module):
                 working_state.priorities,
                 prior_history + (current_writes,),
             )
-        return torch.stack(corrections, dim=1), working_state
+        return corrections, working_state
 
 
 class MultigridMemoryBlock(nn.Module):

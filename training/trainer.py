@@ -63,6 +63,7 @@ class Trainer:
             lr=training_config.lr,
             weight_decay=training_config.weight_decay,
             betas=(0.9, 0.95),
+            fused=device.type == "cuda",
         )
         updates_per_epoch = math.ceil(
             len(train_loader) / training_config.grad_accum_steps
@@ -279,7 +280,9 @@ class Trainer:
                         continue
 
                     nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.config.max_grad_norm
+                        self.model.parameters(),
+                        self.config.max_grad_norm,
+                        foreach=self.device.type == "cuda",
                     )
                     self.optimizer.step()
                     self.scheduler.step()

@@ -13,6 +13,7 @@ python scripts/train_chained_hydra.py
 python scripts/train_tournament_hydra.py
 python scripts/train_growing_width.py
 python scripts/train_multigrid.py
+python scripts/evaluate_multigrid.py
 ```
 
 Each file owns one model preset and writes to a separate checkpoint directory.
@@ -27,6 +28,11 @@ data pipeline, trainer, or CLI.
 
 All validation uses exact tiled cross-entropy, including the 128d sampled-loss
 preset.
+
+`evaluate_multigrid.py` is the exception to the WikiText presets: it trains the
+multigrid mechanism and four matched-parameter baselines separately on seven
+diagnostic sequence tasks, then writes capacity and runtime curves. See
+[`multigrid/README.md`](../multigrid/README.md) for its protocol and outputs.
 
 These entry points intentionally contain configuration only. New presets for a
 registered architecture should follow the same pattern and call

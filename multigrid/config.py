@@ -24,6 +24,7 @@ class MultigridMemoryConfig:
     memory_addressing: str = "softmax"
     n_hash_bits: int = 32
     hash_top_k: int = 8
+    use_triton_memory: bool = True
 
     def __post_init__(self) -> None:
         positive = (

@@ -28,10 +28,12 @@ CONFIG = ExperimentConfig(
         d_memory=64,
         d_key=64,
     ),
-    data=DataConfig(batch_size=1, num_workers=2),
+    data=DataConfig(batch_size=8, num_workers=2),
     training=TrainingConfig(epochs=3, grad_accum_steps=1, ce_backend="full"),
     runtime=RuntimeConfig(
-        compile=False,
+        compile=True,
+        compile_mode="default",
+        compile_backend="auto",
         checkpoint_dir=Path("checkpoints/multigrid"),
     ),
 )

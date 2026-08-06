@@ -1,13 +1,30 @@
 """Attention-free causal multigrid model with surprise-indexed memory."""
 
 from .benchmarks import (
+    ANSWER_TOKEN_COUNT,
+    ANSWER_TOKEN_START,
+    TASK_NAMES,
+    TASK_SUMMARIES,
     BenchmarkBatch,
     associative_recall,
     copying,
+    delayed_copying,
+    delayed_induction,
+    distracted_state_tracking,
+    exact_associative_recall,
+    generate_primitive_batch,
     induction,
+    multi_query_recall,
+    nested_scope_binding,
+    paraphrased_needle_retrieval,
     state_tracking,
 )
 from .config import MultigridMemoryConfig
+from .evaluation import (
+    PrimitiveEvaluationConfig,
+    PrimitiveTrainer,
+    run_primitive_evaluation,
+)
 from .layers import (
     CausalProlongation,
     CausalRestriction,
@@ -19,21 +36,46 @@ from .layers import (
     VCycle,
 )
 from .model import MultigridMemoryTransformer
+from .mechanisms import (
+    MECHANISM_NAMES,
+    SymbolicModelConfig,
+    SymbolicSequenceModel,
+    matched_model_configs,
+)
 
 __all__ = [
+    "ANSWER_TOKEN_COUNT",
+    "ANSWER_TOKEN_START",
     "BenchmarkBatch",
     "CausalProlongation",
     "CausalRestriction",
     "EpisodicMemory",
     "LocalRefinement",
+    "MECHANISM_NAMES",
     "MemoryState",
     "MemoryWrites",
     "MultigridMemoryBlock",
     "MultigridMemoryConfig",
     "MultigridMemoryTransformer",
+    "PrimitiveEvaluationConfig",
+    "PrimitiveTrainer",
+    "SymbolicModelConfig",
+    "SymbolicSequenceModel",
+    "TASK_NAMES",
+    "TASK_SUMMARIES",
     "VCycle",
     "associative_recall",
     "copying",
+    "delayed_copying",
+    "delayed_induction",
+    "distracted_state_tracking",
+    "exact_associative_recall",
+    "generate_primitive_batch",
     "induction",
+    "matched_model_configs",
+    "multi_query_recall",
+    "nested_scope_binding",
+    "paraphrased_needle_retrieval",
+    "run_primitive_evaluation",
     "state_tracking",
 ]
